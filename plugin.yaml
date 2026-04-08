@@ -1,0 +1,42 @@
+# 本文件由 backend/cmd/genmanifest 自动生成，请勿手工修改。
+
+id: airgate-health
+name: 健康监控插件
+version: 0.1.0
+description: AI 提供商健康监控：主动探测、可用率/延迟聚合、对外公开状态页
+author: AirGate
+type: extension
+min_core_version: 1.0.0
+dependencies: []
+config:
+  - key: probe_interval_seconds
+    type: int
+    required: false
+    default: "60"
+    description: 周期性探测的最小间隔；过小会浪费配额
+  - key: probe_concurrency
+    type: int
+    required: false
+    default: "8"
+    description: 同时进行的探测请求上限
+  - key: probe_timeout_seconds
+    type: int
+    required: false
+    default: "15"
+    description: 单个 TestAccount 调用的超时上限
+  - key: retention_days
+    type: int
+    required: false
+    default: "30"
+    description: health_probes 表的清理周期；聚合查询足以覆盖 7/15/30 天窗口
+  - key: public_status_enabled
+    type: bool
+    required: false
+    default: "true"
+    description: 开启后 /status 路由对外公开（无需登录），仅暴露脱敏的平台维度聚合
+frontend_pages:
+  - path: /admin/health
+    title: 健康监控
+    icon: activity
+    description: 账号可用率、延迟趋势、主动探测面板
+    audience: admin
