@@ -71,7 +71,7 @@ export default function StatusPage() {
           <div style={logoMark} />
           <h1 style={h1Style}>服务状态</h1>
         </div>
-        <div style={subtitleStyle}>最近 7 天可用率 · 每分钟自动刷新</div>
+        <div style={subtitleStyle}>可用率取最近 7 天 · 趋势图展示最近 90 天 · 每分钟自动刷新</div>
       </header>
 
       {err && <div style={errStyle}>加载失败: {err}</div>}
