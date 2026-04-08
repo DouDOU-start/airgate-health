@@ -10,7 +10,7 @@ GO := GOTOOLCHAIN=local go
 
 WEBDIST := backend/internal/health/webdist
 
-.PHONY: help install build build-web build-backend release manifest dev ensure-webdist clean test vet
+.PHONY: help install build build-web build-backend release manifest dev ensure-webdist clean test vet ci type-check
 
 help: ## 显示帮助信息
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -64,6 +64,11 @@ manifest: ## 重新生成 plugin.yaml
 	cd backend && $(GO) run ./cmd/genmanifest
 
 # ===================== 质量检查 =====================
+
+ci: ensure-webdist type-check vet test build-backend ## 本地运行与 CI 完全一致的检查
+
+type-check: ## 前端 TypeScript 类型检查
+	cd web && npm run type-check
 
 test: ensure-webdist ## 运行后端测试
 	cd backend && $(GO) test ./...
