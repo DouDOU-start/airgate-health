@@ -51,7 +51,13 @@ export default function HealthDashboard() {
         api.overview(windowSel),
         api.accounts(windowSel, filter),
       ]);
-      setOverview(ov);
+      // 后端在没有任何账号/探测数据时可能返回 null（Go nil slice），统一兜底为空数组，
+      // 避免下方 .map / .length 直接抛 TypeError 把整个面板炸掉。
+      setOverview({
+        ...ov,
+        platforms: ov.platforms ?? [],
+        groups: ov.groups ?? [],
+      });
       setAccounts(ac.list || []);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));

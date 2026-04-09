@@ -107,6 +107,13 @@ func (p *Plugin) handleOverview(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// 保证空切片序列化为 JSON [] 而不是 null，避免前端 .map 崩溃
+	if platforms == nil {
+		platforms = []PlatformHealth{}
+	}
+	if groups == nil {
+		groups = []GroupHealth{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"window":    w0.Name,
 		"platforms": platforms,
@@ -121,6 +128,9 @@ func (p *Plugin) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if list == nil {
+		list = []AccountSummary{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"window": w0.Name,
@@ -151,6 +161,9 @@ func (p *Plugin) handleAdminGroups(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if list == nil {
+		list = []GroupHealth{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"window": w0.Name,
@@ -198,6 +211,9 @@ func (p *Plugin) handlePublicSummary(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "服务暂不可用")
 		return
+	}
+	if groups == nil {
+		groups = []GroupHealth{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"window": w0.Name,
