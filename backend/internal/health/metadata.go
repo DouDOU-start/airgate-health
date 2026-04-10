@@ -60,7 +60,7 @@ func BuildPluginInfo() sdk.PluginInfo {
 			// 不再需要 HTTP + Bearer 鉴权。
 
 			// === 探测参数 ===
-			{Key: "probe_interval_seconds", Label: "探测间隔（秒）", Type: "int", Default: "300", Description: "周期性分组探测的最小间隔；每次探测都是真实的 chat completion 请求，过小会浪费上游配额"},
+			{Key: "probe_interval_seconds", Label: "探测间隔（秒）", Type: "int", Default: "300", Description: "周期性分组探测的最小间隔；每次探测都是真实的上游 API 请求，过小会浪费上游配额"},
 			{Key: "probe_concurrency", Label: "探测并发数", Type: "int", Default: "4", Description: "同时进行的分组探测上限"},
 
 			// === 数据保留 ===
