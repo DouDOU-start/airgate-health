@@ -44,7 +44,7 @@ func BuildPluginInfo() sdk.PluginInfo {
 		// 没声明任何一项都会被 core 的 capability interceptor 以 PermissionDenied 拒绝。
 		// 注：账号状态机反馈由 core 在 ProbeForward 内部完成，prober 不直接调
 		// host.report_account_result，所以这里不声明该 capability。
-		Capabilities: []string{
+		Capabilities: []sdk.Capability{
 			sdk.CapabilityHostListGroups,
 			sdk.CapabilityHostProbeForward,
 		},
