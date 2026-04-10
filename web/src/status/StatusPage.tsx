@@ -40,12 +40,15 @@ export default function StatusPage() {
 
   // 因为 standalone 页面没有 core 的全局 body 样式，我们手动给 document.body
   // 设置背景与字体；只在 mount 时设置一次。
+  //
+  // 不设 minHeight: 100vh —— 否则配合 pageStyle 的 padding 会让总高度
+  // 超过 viewport（content-box 默认下 100vh + padding = viewport + padding），
+  // 出现毫无意义的滚动条。让 body 高度由 pageStyle 内的内容自然决定。
   useEffect(() => {
     document.body.style.margin = '0';
     document.body.style.background = cssVar('bgDeep');
     document.body.style.color = cssVar('text');
     document.body.style.fontFamily = cssVar('fontSans');
-    document.body.style.minHeight = '100vh';
   }, []);
 
   const reload = () => {
@@ -67,11 +70,20 @@ export default function StatusPage() {
   return (
     <div style={pageStyle}>
       <header style={headerStyle}>
-        <div style={brandRow}>
-          <div style={logoMark} />
-          <h1 style={h1Style}>服务状态</h1>
+        {/* 左：logo + 标题 + 副标题，作为一组品牌区 */}
+        <div style={brandColumnStyle}>
+          <div style={brandRow}>
+            <div style={logoMark} />
+            <h1 style={h1Style}>服务状态</h1>
+          </div>
+          <div style={subtitleStyle}>
+            可用率取最近 7 天 · 趋势图按小时展示最近 168 小时 · 每分钟自动刷新
+          </div>
         </div>
-        <div style={subtitleStyle}>可用率取最近 7 天 · 趋势图按小时展示最近 168 小时 · 每分钟自动刷新</div>
+        {/* 右：返回控制台。普通 <a> 而非 SPA 路由 —— standalone 页没有 React Router 上下文 */}
+        <a href="/" style={backLinkStyle} title="返回控制台">
+          ← 返回控制台
+        </a>
       </header>
 
       {err && <div style={errStyle}>加载失败: {err}</div>}
@@ -172,38 +184,53 @@ function HourlyGrid({ hourly }: { hourly: HourlyPoint[] }) {
   }
 
   return (
-    <div style={{ display: 'flex', gap: 1, height: 26, marginTop: 14 }}>
-      {slots.map(({ key, hp }) => {
-        const total = hp?.total ?? 0;
-        const uptime = hp?.uptime_pct ?? -1;
-        const color =
-          total === 0
-            ? cssVar('bgHover')
-            : uptime >= 99.5
-              ? cssVar('success')
-              : uptime >= 95
-                ? cssVar('warning')
-                : cssVar('danger');
-        // hover tooltip 转换 UTC 时间到本地，便于运维直接读
-        const localLabel = new Date(key).toLocaleString();
-        const tooltip =
-          total === 0
-            ? `${localLabel}: 无数据`
-            : `${localLabel}: ${uptime.toFixed(2)}% (${hp!.success}/${hp!.total})`;
-        return (
-          <div
-            key={key}
-            title={tooltip}
-            style={{
-              flex: 1,
-              background: color,
-              borderRadius: 1,
-              minWidth: 2,
-              opacity: total === 0 ? 0.4 : 1,
-            }}
-          />
-        );
-      })}
+    <div style={{ marginTop: 14 }}>
+      {/*
+        关键约束：168 个 flex 子元素 + minWidth + gap 总宽度必须 <= card 内容宽度，
+        否则会溢出。content-box 下 border/padding 会额外占用宽度，所以这里柱子
+        **绝对不能加 border 或 padding**——否则 168 倍叠加直接撑爆 card。
+        要表达"无数据"用纯 background + opacity，不要用边框。
+      */}
+      <div style={{ display: 'flex', gap: 2, height: 32 }}>
+        {slots.map(({ key, hp }) => {
+          const total = hp?.total ?? 0;
+          const uptime = hp?.uptime_pct ?? -1;
+          // 三档健康色 + 一档"无数据"暗色，依靠对比度 + opacity 区分
+          const color =
+            total === 0
+              ? cssVar('glassBorder')
+              : uptime >= 99.5
+                ? cssVar('success')
+                : uptime >= 95
+                  ? cssVar('warning')
+                  : cssVar('danger');
+          // hover tooltip 转换 UTC 时间到本地，便于运维直接读
+          const localLabel = new Date(key).toLocaleString();
+          const tooltip =
+            total === 0
+              ? `${localLabel}: 无数据`
+              : `${localLabel}: ${uptime.toFixed(2)}% (${hp!.success}/${hp!.total})`;
+          return (
+            <div
+              key={key}
+              title={tooltip}
+              style={{
+                flex: 1,
+                background: color,
+                borderRadius: 2,
+                minWidth: 3,
+                opacity: total === 0 ? 0.45 : 1,
+              }}
+            />
+          );
+        })}
+      </div>
+      {/* 时间轴标签：左 168 小时前 / 右 现在 */}
+      <div style={hourlyAxisStyle}>
+        <span>168 小时前</span>
+        <div style={hourlyAxisDividerStyle} />
+        <span>现在</span>
+      </div>
     </div>
   );
 }
@@ -214,44 +241,92 @@ function HourlyGrid({ hourly }: { hourly: HourlyPoint[] }) {
 
 const pageStyle: React.CSSProperties = {
   fontFamily: cssVar('fontSans'),
-  maxWidth: 800,
+  maxWidth: 960,
   margin: '0 auto',
-  padding: '48px 24px 64px',
+  padding: '48px 24px 48px',
   color: cssVar('text'),
-  minHeight: '100vh',
+  // 故意不设 minHeight: 100vh —— 见 StatusPage 顶部的 useEffect 注释
+  // 整页高度由内容自然撑开，避免不必要的滚动条
 };
 
 const headerStyle: React.CSSProperties = {
-  marginBottom: 32,
+  display: 'flex',
+  alignItems: 'flex-start',
+  justifyContent: 'space-between',
+  gap: 16,
+  marginBottom: 28,
+  paddingBottom: 20,
+  borderBottom: `1px solid ${cssVar('glassBorder')}`,
+};
+
+const brandColumnStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 10,
+  minWidth: 0, // 允许内部 truncate 时不撑破 flex container
 };
 
 const brandRow: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: 14,
-  marginBottom: 8,
 };
 
 const logoMark: React.CSSProperties = {
-  width: 28,
-  height: 28,
-  borderRadius: 8,
+  width: 32,
+  height: 32,
+  borderRadius: 9,
   background: `linear-gradient(135deg, ${cssVar('primary')}, ${cssVar('primaryHover')})`,
   boxShadow: cssVar('shadowGlow'),
+  flexShrink: 0,
 };
 
 const h1Style: React.CSSProperties = {
-  fontSize: 28,
+  fontSize: 26,
   fontWeight: 600,
   margin: 0,
   color: cssVar('text'),
   letterSpacing: '-0.02em',
+  lineHeight: 1.2,
 };
 
 const subtitleStyle: React.CSSProperties = {
   color: cssVar('textSecondary'),
-  fontSize: 13,
-  marginLeft: 42,
+  fontSize: 12,
+  lineHeight: 1.5,
+};
+
+const backLinkStyle: React.CSSProperties = {
+  // 不再用 marginLeft:auto，header 已经是 space-between
+  flexShrink: 0,
+  fontSize: 12,
+  color: cssVar('textSecondary'),
+  textDecoration: 'none',
+  padding: '8px 14px',
+  borderRadius: 8,
+  border: `1px solid ${cssVar('glassBorder')}`,
+  background: cssVar('bgSurface'),
+  transition: 'all 0.15s',
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 4,
+  lineHeight: 1,
+};
+
+const hourlyAxisStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  marginTop: 8,
+  fontSize: 11,
+  color: cssVar('textTertiary'),
+  fontVariantNumeric: 'tabular-nums',
+};
+
+const hourlyAxisDividerStyle: React.CSSProperties = {
+  flex: 1,
+  height: 1,
+  background: cssVar('glassBorder'),
+  margin: '0 12px',
 };
 
 const cardStyle: React.CSSProperties = {

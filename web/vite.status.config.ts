@@ -6,6 +6,11 @@ import react from '@vitejs/plugin-react';
 //
 // 输出位于 dist/ 下，最终会被 Makefile 同步到 backend/internal/health/webdist/，
 // 再由插件的 readAsset() 在 GET /status 时返回。
+
+const watchOptions = process.argv.includes('--watch')
+  ? { chokidar: { usePolling: true, interval: 1000 } }
+  : undefined;
+
 export default defineConfig({
   plugins: [react()],
   // base = /status/ 让构建出的 status.html 里所有 <script>/<link> 都用 /status/assets/...
@@ -16,6 +21,7 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: false, // 不清掉主 build 的产物
+    watch: watchOptions,
     rollupOptions: {
       input: {
         status: 'status.html',

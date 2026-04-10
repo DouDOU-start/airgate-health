@@ -53,30 +53,38 @@ func (p *Plugin) GetWebAssets() map[string][]byte {
 	return assets
 }
 
-// readAsset 公开状态页 handler 用：从 webdist 中按相对路径取一个文件。
-// 同样是开发模式优先读真实目录。
+// readAsset 公开状态页 handler 用：按相对路径取一个 webdist 文件。
+//
+// 双模式：
+//   - 开发模式：每次直接读 ../web/dist 真实目录，不缓存。让 vite watch 改完
+//     status page 后浏览器硬刷新即可生效，不用重启 health 进程。
+//   - 生产模式：使用 //go:embed 嵌入的 webdist 内容，全量加载到内存只一次。
+//
+// 选择"dev 模式不缓存"是因为 vite watch 重新构建时 dist/ 文件会被瞬间替换，
+// 而不是写入到一个新的 hashed 路径——同名文件需要每次都重读。
 func (p *Plugin) readAsset(rel string) ([]byte, bool) {
 	rel = strings.TrimPrefix(rel, "/")
-	cache := getAssetCache()
+	if dev := loadDevAssets(); len(dev) > 0 {
+		// dev 模式：每次都重新 walk dist/，不复用上次结果
+		data, ok := dev[rel]
+		return data, ok
+	}
+	cache := getEmbedAssetCache()
 	if data, ok := cache[rel]; ok {
 		return data, true
 	}
 	return nil, false
 }
 
-// 全局缓存：第一次调用时把所有 webdist 文件加载到内存，避免每个请求都 walk。
-// 与 GetWebAssets 共享同一份逻辑（dev 模式优先磁盘）。
+// 生产模式 embed 资源缓存：第一次调用时全量读到内存。
+// dev 模式不走这条路径。
 var (
-	assetCacheOnce sync.Once
-	assetCache     map[string][]byte
+	embedAssetCacheOnce sync.Once
+	embedAssetCache     map[string][]byte
 )
 
-func getAssetCache() map[string][]byte {
-	assetCacheOnce.Do(func() {
-		if dev := loadDevAssets(); len(dev) > 0 {
-			assetCache = dev
-			return
-		}
+func getEmbedAssetCache() map[string][]byte {
+	embedAssetCacheOnce.Do(func() {
 		out := make(map[string][]byte)
 		_ = fs.WalkDir(webDistFS, "webdist", func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
@@ -93,9 +101,9 @@ func getAssetCache() map[string][]byte {
 			out[rel] = content
 			return nil
 		})
-		assetCache = out
+		embedAssetCache = out
 	})
-	return assetCache
+	return embedAssetCache
 }
 
 func loadDevAssets() map[string][]byte {

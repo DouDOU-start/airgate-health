@@ -12,6 +12,8 @@ vendor/
 # 编译产物
 bin/
 backend/genmanifest
+backend/internal/health/webdist/*
+!backend/internal/health/webdist/.gitkeep
 
 # TypeScript
 *.tsbuildinfo
