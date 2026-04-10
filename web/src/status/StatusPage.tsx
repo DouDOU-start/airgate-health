@@ -11,8 +11,8 @@ import { cssVar } from '@airgate/theme';
 // 所以即使 :root 上没有 --ag-* 变量，页面也会以 darkTheme 渲染——这正是我们想要的，
 // 公开状态页天然采用品牌深色风格。
 
-interface DailyPoint {
-  date: string;
+interface HourlyPoint {
+  hour: string; // ISO8601 e.g. "2026-04-10T08:00:00Z"
   total: number;
   success: number;
   uptime_pct: number;
@@ -26,7 +26,7 @@ interface GroupHealth {
   uptime_pct: number;
   latency_p95: number;
   status_color: 'green' | 'yellow' | 'red' | 'gray';
-  daily?: DailyPoint[];
+  hourly?: HourlyPoint[];
 }
 
 interface Summary {
@@ -71,7 +71,7 @@ export default function StatusPage() {
           <div style={logoMark} />
           <h1 style={h1Style}>服务状态</h1>
         </div>
-        <div style={subtitleStyle}>可用率取最近 7 天 · 趋势图展示最近 90 天 · 每分钟自动刷新</div>
+        <div style={subtitleStyle}>可用率取最近 7 天 · 趋势图按小时展示最近 168 小时 · 每分钟自动刷新</div>
       </header>
 
       {err && <div style={errStyle}>加载失败: {err}</div>}
@@ -128,39 +128,78 @@ function GroupCard({ g }: { g: GroupHealth }) {
         </div>
       </div>
 
-      {g.daily && g.daily.length > 0 && <DailyGrid daily={g.daily} />}
+      <HourlyGrid hourly={g.hourly ?? []} />
       <div style={cardMetaStyle}>p95 延迟 {g.latency_p95}ms</div>
     </div>
   );
 }
 
-function DailyGrid({ daily }: { daily: DailyPoint[] }) {
-  const slots = daily.slice(-90);
+// HOURLY_BUCKETS 公开状态页固定展示最近 168 小时（7 天）。
+// 这个数字必须与后端 handlePublicSummary 传给 GroupHealthList 的 hourlyHours 一致，
+// 否则前端时间轴会比后端数据多/少几个柱子，对不齐。
+const HOURLY_BUCKETS = 168;
+
+// HourlyGrid 渲染最近 168 小时的可用率方格。
+//
+// 关键设计：**前端生成完整的时间轴**，再从后端返回的稀疏 hourly 数据里查找对应桶。
+// 后端只返回有探测数据的小时（COUNT > 0），完全没探测的小时不在结果里——前端
+// 必须把这些"空洞"也渲染成灰色柱子，否则可用率数据少几小时会让格子数量
+// 在不同 group 之间不一致，看起来很乱。
+//
+// 时间轴起点：当前时刻向前推 168 小时，按小时对齐。
+function HourlyGrid({ hourly }: { hourly: HourlyPoint[] }) {
+  // 1. 把后端结果按 hour 字符串建索引
+  const byHour = new Map<string, HourlyPoint>();
+  for (const h of hourly) {
+    byHour.set(h.hour, h);
+  }
+
+  // 2. 生成完整的 168 个小时刻度（向前对齐到整点 UTC）
+  const slots: Array<{ key: string; hp: HourlyPoint | undefined }> = [];
+  const now = new Date();
+  // 对齐到当前小时的整点（UTC）
+  const alignedNowUTC = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate(),
+    now.getUTCHours(),
+  ));
+  for (let i = HOURLY_BUCKETS - 1; i >= 0; i--) {
+    const t = new Date(alignedNowUTC.getTime() - i * 3600 * 1000);
+    // 与后端 to_char 输出对齐：YYYY-MM-DDTHH:00:00Z
+    const key = t.toISOString().replace(/:\d{2}\.\d{3}Z$/, ':00:00Z');
+    slots.push({ key, hp: byHour.get(key) });
+  }
+
   return (
-    <div style={{ display: 'flex', gap: 3, height: 26, marginTop: 14 }}>
-      {slots.map((d) => {
+    <div style={{ display: 'flex', gap: 1, height: 26, marginTop: 14 }}>
+      {slots.map(({ key, hp }) => {
+        const total = hp?.total ?? 0;
+        const uptime = hp?.uptime_pct ?? -1;
         const color =
-          d.total === 0
+          total === 0
             ? cssVar('bgHover')
-            : d.uptime_pct >= 99.5
+            : uptime >= 99.5
               ? cssVar('success')
-              : d.uptime_pct >= 95
+              : uptime >= 95
                 ? cssVar('warning')
                 : cssVar('danger');
+        // hover tooltip 转换 UTC 时间到本地，便于运维直接读
+        const localLabel = new Date(key).toLocaleString();
+        const tooltip =
+          total === 0
+            ? `${localLabel}: 无数据`
+            : `${localLabel}: ${uptime.toFixed(2)}% (${hp!.success}/${hp!.total})`;
         return (
           <div
-            key={d.date}
-            title={`${d.date}: ${
-              d.total === 0
-                ? '无数据'
-                : d.uptime_pct.toFixed(2) + '% (' + d.success + '/' + d.total + ')'
-            }`}
+            key={key}
+            title={tooltip}
             style={{
               flex: 1,
               background: color,
-              borderRadius: 2,
-              minWidth: 4,
-              opacity: d.total === 0 ? 0.4 : 1,
+              borderRadius: 1,
+              minWidth: 2,
+              opacity: total === 0 ? 0.4 : 1,
             }}
           />
         );

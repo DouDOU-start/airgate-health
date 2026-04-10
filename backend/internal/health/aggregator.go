@@ -43,13 +43,31 @@ func ParseWindow(s string) Window {
 	}
 }
 
-// DailyPoint 单日聚合点。
+// DailyPoint 单日聚合点（按 date_trunc('day', probed_at) 分组）。
 type DailyPoint struct {
 	Date         string  `json:"date"` // YYYY-MM-DD
 	TotalProbes  int     `json:"total"`
 	SuccessCount int     `json:"success"`
 	UptimePct    float64 `json:"uptime_pct"`
 	LatencyP95   int     `json:"latency_p95"`
+}
+
+// HourlyPoint 单小时聚合点（按 date_trunc('hour', probed_at) 分组）。
+//
+// 与 DailyPoint 并存而不是替代：
+//   - DailyPoint 用于"长期趋势"视图（90 天概览）
+//   - HourlyPoint 用于"近期细节"视图（7 天 = 168 个柱子，公开状态页用此）
+//
+// 探测频率默认 5 分钟一次 → 每个小时桶约 12 个样本，可用率有 0~100% 之间的
+// 13 个离散档位，足够区分"完全 OK / 偶发抖动 / 部分故障 / 完全宕机"。
+// 比 15 分钟桶（3 个样本，只有 0/33/67/100% 四个档位）信号丰富得多。
+type HourlyPoint struct {
+	// Hour ISO8601 起始时间，格式 "YYYY-MM-DDTHH:00:00Z"。
+	// 选 ISO8601 而非纯小时数是因为前端 hover 提示要展示具体时刻。
+	Hour         string  `json:"hour"`
+	TotalProbes  int     `json:"total"`
+	SuccessCount int     `json:"success"`
+	UptimePct    float64 `json:"uptime_pct"`
 }
 
 // PlatformHealth 一个 platform（聚合所有该 platform 下的分组探测）。
@@ -67,21 +85,22 @@ type PlatformHealth struct {
 
 // GroupHealth 一个 group 的聚合。
 type GroupHealth struct {
-	GroupID      int64        `json:"group_id"`
-	GroupName    string       `json:"group_name"`
-	Platform     string       `json:"platform"`
-	Note         string       `json:"note,omitempty"` // 来自 core groups.note
-	Window       string       `json:"window"`
-	TotalProbes  int          `json:"total_probes"`
-	SuccessCount int          `json:"success_count"`
-	UptimePct    float64      `json:"uptime_pct"`
-	LatencyP50   int          `json:"latency_p50"`
-	LatencyP95   int          `json:"latency_p95"`
-	LatencyP99   int          `json:"latency_p99"`
-	LastProbedAt *time.Time   `json:"last_probed_at,omitempty"`
-	LastError    string       `json:"last_error,omitempty"` // 最近一次失败的 error_msg
-	StatusColor  string       `json:"status_color"`
-	Daily        []DailyPoint `json:"daily,omitempty"` // 90 天日桶
+	GroupID      int64         `json:"group_id"`
+	GroupName    string        `json:"group_name"`
+	Platform     string        `json:"platform"`
+	Note         string        `json:"note,omitempty"` // 来自 core groups.note
+	Window       string        `json:"window"`
+	TotalProbes  int           `json:"total_probes"`
+	SuccessCount int           `json:"success_count"`
+	UptimePct    float64       `json:"uptime_pct"`
+	LatencyP50   int           `json:"latency_p50"`
+	LatencyP95   int           `json:"latency_p95"`
+	LatencyP99   int           `json:"latency_p99"`
+	LastProbedAt *time.Time    `json:"last_probed_at,omitempty"`
+	LastError    string        `json:"last_error,omitempty"` // 最近一次失败的 error_msg
+	StatusColor  string        `json:"status_color"`
+	Daily        []DailyPoint  `json:"daily,omitempty"`  // 90 天日桶（长期趋势用）
+	Hourly       []HourlyPoint `json:"hourly,omitempty"` // 168 小时桶 = 7 天（公开状态页用）
 }
 
 // Aggregator 聚合查询的入口。
@@ -267,7 +286,10 @@ func (a *Aggregator) fillMissingPlatforms(ctx context.Context, out *[]PlatformHe
 // 用 LEFT JOIN 而不是只查 group_health_probes，是为了：
 //   - 新加的分组即使还没被探测过，也要显示（状态灰）
 //   - 被删除的分组不会再出现（group_health_probes 里虽有历史数据但 JOIN 失败）
-func (a *Aggregator) GroupHealthList(ctx context.Context, w Window, includeDaily bool) ([]GroupHealth, error) {
+//
+// hourlyHours > 0 时额外填充 GroupHealth.Hourly（按小时分桶，最近 N 小时）。
+// 公开状态页传 168（7 天 × 24 小时）；admin 视图传 0 跳过。
+func (a *Aggregator) GroupHealthList(ctx context.Context, w Window, includeDaily bool, hourlyHours int) ([]GroupHealth, error) {
 	since := time.Now().AddDate(0, 0, -w.Days)
 
 	rows, err := a.db.QueryContext(ctx, `
@@ -338,6 +360,13 @@ func (a *Aggregator) GroupHealthList(ctx context.Context, w Window, includeDaily
 			}
 			out[i].Daily = daily
 		}
+		if hourlyHours > 0 {
+			hourly, err := a.hourlyBucketsByGroup(ctx, out[i].GroupID, hourlyHours)
+			if err != nil {
+				return nil, err
+			}
+			out[i].Hourly = hourly
+		}
 	}
 	return out, nil
 }
@@ -352,6 +381,49 @@ func (a *Aggregator) dailyBucketsByGroup(ctx context.Context, groupID int64, day
 
 func (a *Aggregator) dailyBucketsByPlatform(ctx context.Context, platform string, days int) ([]DailyPoint, error) {
 	return a.dailyBuckets(ctx, "platform", platform, days)
+}
+
+// hourlyBucketsByGroup 按小时分桶聚合一个分组最近 hours 小时的探测数据。
+//
+// 与 dailyBucketsByGroup 的区别：
+//   - 用 date_trunc('hour', ...) 而非 'day'
+//   - 时间窗口用 NOW() - INTERVAL，按小时倒推
+//   - 返回的 Hour 字段是 ISO8601 时间戳字符串，便于前端 hover 展示具体时刻
+//
+// SQL 不主动填充"无数据"小时（COUNT(*)=0 的桶不会出现在 GROUP BY 结果里）。
+// 让前端按 hours 数值生成完整时间轴，从结果集里查找对应桶填充——这样即使
+// 某个小时完全没探测，UI 也能渲染一个"无数据"状态的灰色柱子。
+func (a *Aggregator) hourlyBucketsByGroup(ctx context.Context, groupID int64, hours int) ([]HourlyPoint, error) {
+	if hours <= 0 {
+		return nil, nil
+	}
+	since := time.Now().Add(-time.Duration(hours) * time.Hour)
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT
+			to_char(date_trunc('hour', probed_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:00:00"Z"') AS h,
+			COUNT(*) FILTER (WHERE success = TRUE) AS s,
+			COUNT(*) AS t
+		FROM group_health_probes
+		WHERE group_id = $1 AND probed_at >= $2
+		GROUP BY 1
+		ORDER BY 1
+	`, groupID, since)
+	if err != nil {
+		return nil, fmt.Errorf("hourly 桶查询失败: %w", err)
+	}
+	defer rows.Close()
+	var out []HourlyPoint
+	for rows.Next() {
+		var hp HourlyPoint
+		var s, t int
+		if err := rows.Scan(&hp.Hour, &s, &t); err != nil {
+			return nil, err
+		}
+		hp.SuccessCount, hp.TotalProbes = s, t
+		hp.UptimePct = computeUptime(s, t)
+		out = append(out, hp)
+	}
+	return out, rows.Err()
 }
 
 // dailyBuckets 按日期分桶；filterColumn 应为 "group_id" 或 "platform"。

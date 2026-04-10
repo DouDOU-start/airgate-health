@@ -103,7 +103,7 @@ func (p *Plugin) handleOverview(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	groups, err := p.agg.GroupHealthList(r.Context(), w0, false)
+	groups, err := p.agg.GroupHealthList(r.Context(), w0, false, 0)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -124,7 +124,7 @@ func (p *Plugin) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 func (p *Plugin) handleAdminGroups(w http.ResponseWriter, r *http.Request) {
 	w0 := ParseWindow(r.URL.Query().Get("window"))
-	list, err := p.agg.GroupHealthList(r.Context(), w0, false)
+	list, err := p.agg.GroupHealthList(r.Context(), w0, false, 0)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -189,14 +189,18 @@ func (p *Plugin) handleAdminProbeGroup(w http.ResponseWriter, r *http.Request) {
 // handlePublicSummary 公开状态页的数据接口。
 //
 // 脱敏规则：
-//   - 只暴露 group 维度（group_name + platform + 状态 + 备注 + 90 天方格图），
+//   - 只暴露 group 维度（group_name + platform + 状态 + 备注 + 168 小时方格图），
 //     让订阅了具体分组的用户能识别自己使用的渠道是否受影响。
 //   - 备注本身就是面向用户的运维说明（管理员在「分组管理」页填写）。
 //   - 不返回 group_id 不是严格必须的（group_id 本身不敏感），但继续保留
 //     以便前端缓存键使用。error_msg 仍然过滤掉。
+//
+// 趋势粒度：传 hourlyHours=168（7 天），不再传 daily（公开页只看近 7 天细节）。
+// 168 个柱子比之前的 90 天 × 1 天柱子信号更密集——每柱代表 1 小时（约 12 个
+// 5 分钟探测样本），能区分小时级抖动。
 func (p *Plugin) handlePublicSummary(w http.ResponseWriter, r *http.Request) {
 	w0 := ParseWindow(r.URL.Query().Get("window"))
-	groups, err := p.agg.GroupHealthList(r.Context(), w0, true)
+	groups, err := p.agg.GroupHealthList(r.Context(), w0, false, 168)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "服务暂不可用")
 		return
