@@ -73,7 +73,7 @@ export default function StatusPage() {
         {/* 左：logo + 标题 + 副标题，作为一组品牌区 */}
         <div style={brandColumnStyle}>
           <div style={brandRow}>
-            <div style={logoMark} />
+            <LogoIcon />
             <h1 style={h1Style}>服务状态</h1>
           </div>
           <div style={subtitleStyle}>
@@ -98,6 +98,22 @@ export default function StatusPage() {
 
       <footer style={footerStyle}>Powered by airgate-health</footer>
     </div>
+  );
+}
+
+function LogoIcon() {
+  return (
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+      <rect x="1" y="1" width="22" height="22" rx="6" stroke={cssVar('primary')} strokeWidth="1.5" fill="none" />
+      <polyline
+        points="4,13 8,13 10,8 12,16 14,11 16,13 20,13"
+        stroke={cssVar('primary')}
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+    </svg>
   );
 }
 
@@ -167,9 +183,8 @@ function HourlyGrid({ hourly }: { hourly: HourlyPoint[] }) {
   }
 
   // 2. 生成完整的 168 个小时刻度（向前对齐到整点 UTC）
-  const slots: Array<{ key: string; hp: HourlyPoint | undefined }> = [];
+  const slots: Array<{ key: string; t: Date; hp: HourlyPoint | undefined }> = [];
   const now = new Date();
-  // 对齐到当前小时的整点（UTC）
   const alignedNowUTC = new Date(Date.UTC(
     now.getUTCFullYear(),
     now.getUTCMonth(),
@@ -178,58 +193,76 @@ function HourlyGrid({ hourly }: { hourly: HourlyPoint[] }) {
   ));
   for (let i = HOURLY_BUCKETS - 1; i >= 0; i--) {
     const t = new Date(alignedNowUTC.getTime() - i * 3600 * 1000);
-    // 与后端 to_char 输出对齐：YYYY-MM-DDTHH:00:00Z
-    const key = t.toISOString().replace(/:\d{2}\.\d{3}Z$/, ':00:00Z');
-    slots.push({ key, hp: byHour.get(key) });
+    const key = t.toISOString().replace(/\.\d{3}Z$/, 'Z');
+    slots.push({ key, t, hp: byHour.get(key) });
+  }
+
+  // 3. 按本地日期分组（每天一大格，内部按小时分小格）
+  const days: Array<{ label: string; slots: typeof slots }> = [];
+  let currentDay = '';
+  for (const slot of slots) {
+    const localDate = slot.t.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+    if (localDate !== currentDay) {
+      currentDay = localDate;
+      days.push({ label: localDate, slots: [] });
+    }
+    days[days.length - 1].slots.push(slot);
   }
 
   return (
     <div style={{ marginTop: 14 }}>
-      {/*
-        关键约束：168 个 flex 子元素 + minWidth + gap 总宽度必须 <= card 内容宽度，
-        否则会溢出。content-box 下 border/padding 会额外占用宽度，所以这里柱子
-        **绝对不能加 border 或 padding**——否则 168 倍叠加直接撑爆 card。
-        要表达"无数据"用纯 background + opacity，不要用边框。
-      */}
-      <div style={{ display: 'flex', gap: 2, height: 32 }}>
-        {slots.map(({ key, hp }) => {
-          const total = hp?.total ?? 0;
-          const uptime = hp?.uptime_pct ?? -1;
-          // 三档健康色 + 一档"无数据"暗色，依靠对比度 + opacity 区分
-          const color =
-            total === 0
-              ? cssVar('glassBorder')
-              : uptime >= 99.5
-                ? cssVar('success')
-                : uptime >= 95
-                  ? cssVar('warning')
-                  : cssVar('danger');
-          // hover tooltip 转换 UTC 时间到本地，便于运维直接读
-          const localLabel = new Date(key).toLocaleString();
-          const tooltip =
-            total === 0
-              ? `${localLabel}: 无数据`
-              : `${localLabel}: ${uptime.toFixed(2)}% (${hp!.success}/${hp!.total})`;
-          return (
-            <div
-              key={key}
-              title={tooltip}
-              style={{
-                flex: 1,
-                background: color,
-                borderRadius: 2,
-                minWidth: 3,
-                opacity: total === 0 ? 0.45 : 1,
-              }}
-            />
-          );
-        })}
+      {/* 按天分格，天之间用细竖线分隔 */}
+      <div style={{ display: 'flex', gap: 1, height: 40 }}>
+        {days.map((day, di) => (
+          <div
+            key={day.label}
+            style={{
+              display: 'flex',
+              gap: 1,
+              flex: day.slots.length,
+              borderRight: di < days.length - 1 ? '1px solid rgba(255,255,255,0.15)' : undefined,
+              paddingRight: di < days.length - 1 ? 2 : undefined,
+            }}
+          >
+            {day.slots.map(({ key, hp }) => {
+              const total = hp?.total ?? 0;
+              const uptime = hp?.uptime_pct ?? -1;
+              const barColor =
+                total === 0
+                  ? '#ffffff'
+                  : uptime >= 99.5
+                    ? '#22c55e'
+                    : uptime >= 95
+                      ? '#eab308'
+                      : '#ef4444';
+              const localLabel = new Date(key).toLocaleString();
+              const tooltip =
+                total === 0
+                  ? `${localLabel}: 无数据`
+                  : `${localLabel}: ${uptime.toFixed(2)}% (${hp!.success}/${hp!.total})`;
+              return (
+                <div
+                  key={key}
+                  title={tooltip}
+                  style={{
+                    flex: 1,
+                    background: barColor,
+                    borderRadius: 2,
+                    opacity: total === 0 ? 0.12 : 1,
+                  }}
+                />
+              );
+            })}
+          </div>
+        ))}
       </div>
-      {/* 时间轴标签：左 168 小时前 / 右 现在 */}
+      {/* 日期轴标签 */}
       <div style={hourlyAxisStyle}>
-        <span>168 小时前</span>
-        <div style={hourlyAxisDividerStyle} />
-        <span>现在</span>
+        {days.map((day, i) => (
+          <span key={day.label} style={{ flex: day.slots.length, textAlign: 'center', fontSize: 10 }}>
+            {i === days.length - 1 ? '今天' : day.label}
+          </span>
+        ))}
       </div>
     </div>
   );
@@ -270,15 +303,6 @@ const brandRow: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: 14,
-};
-
-const logoMark: React.CSSProperties = {
-  width: 32,
-  height: 32,
-  borderRadius: 9,
-  background: `linear-gradient(135deg, ${cssVar('primary')}, ${cssVar('primaryHover')})`,
-  boxShadow: cssVar('shadowGlow'),
-  flexShrink: 0,
 };
 
 const h1Style: React.CSSProperties = {
