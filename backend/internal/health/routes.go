@@ -22,23 +22,24 @@ const (
 // 所以插件这边看到的 path 已经不带前缀）：
 //
 //	admin 入口   (/api/v1/ext/airgate-health/admin/xxx → 插件看到 /admin/xxx)
-//	  GET    /admin/overview                    平台 + 账号 总览
-//	  GET    /admin/accounts                    账号摘要列表（?platform=&window=）
-//	  GET    /admin/accounts/{id}               单账号详情 + 90 天日桶
-//	  GET    /admin/groups                      group 维度聚合
-//	  POST   /admin/probe/group/{id}            手动触发一次整组探测
+//	  GET    /admin/overview                    平台 + 分组 总览
+//	  GET    /admin/groups                      分组维度聚合（?window=）
+//	  GET    /admin/groups/{id}                 单分组详情 + 90 天日桶
+//	  POST   /admin/probe/group/{id}            手动触发一次分组探测
 //
 //	public 入口  (/status, /status/api/summary, /status/assets/* → 插件看到 /, /api/summary, /assets/*)
 //	  GET    /                                  静态 HTML 入口（status.html）
 //	  GET    /api/summary                       脱敏的分组维度聚合（含备注、90 天方格图）
 //	  GET    /assets/                           静态资源前缀
+//
+// Step 2 变更：删除 /admin/accounts 和 /admin/accounts/{id}；探测粒度改为分组级，
+// 账号详情不再属于本插件职责。
 func (p *Plugin) registerRoutes(r sdk.RouteRegistrar) {
 	// === admin ===
 	r.Handle(http.MethodGet, "/admin/overview", p.requireAdmin(p.requireConfigured(p.handleOverview)))
-	r.Handle(http.MethodGet, "/admin/accounts", p.requireAdmin(p.requireConfigured(p.handleAdminAccounts)))
-	r.Handle(http.MethodGet, "/admin/accounts/", p.requireAdmin(p.requireConfigured(p.handleAdminAccountDetail))) // 前缀匹配 /admin/accounts/{id}
 	r.Handle(http.MethodGet, "/admin/groups", p.requireAdmin(p.requireConfigured(p.handleAdminGroups)))
-	r.Handle(http.MethodPost, "/admin/probe/group/", p.requireAdmin(p.requireConfigured(p.handleAdminProbeGroup))) // /admin/probe/group/{group_id}
+	r.Handle(http.MethodGet, "/admin/groups/", p.requireAdmin(p.requireConfigured(p.handleAdminGroupDetail))) // 前缀匹配 /admin/groups/{id}
+	r.Handle(http.MethodPost, "/admin/probe/group/", p.requireAdmin(p.requireConfigured(p.handleAdminProbeGroup)))
 
 	// === public（通过 core /status/* 反向代理；core 已剥掉 /status 前缀）===
 	r.Handle(http.MethodGet, "/api/summary", p.requirePublic(p.requireConfigured(p.handlePublicSummary)))
@@ -54,7 +55,7 @@ func (p *Plugin) requireConfigured(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !p.Configured() {
 			writeJSONErr(w, http.StatusServiceUnavailable,
-				"健康监控插件尚未就绪：请管理员在「系统设置 → 安全与认证」生成 admin API key，然后在「插件管理」热加载本插件")
+				"健康监控插件尚未就绪：请确认 core 数据库配置正常，然后在「插件管理」页热加载本插件")
 			return
 		}
 		next(w, r)
@@ -121,40 +122,6 @@ func (p *Plugin) handleOverview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (p *Plugin) handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
-	w0 := ParseWindow(r.URL.Query().Get("window"))
-	platform := r.URL.Query().Get("platform")
-	list, err := p.agg.AccountSummariesByPlatform(r.Context(), platform, w0)
-	if err != nil {
-		writeJSONErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if list == nil {
-		list = []AccountSummary{}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"window": w0.Name,
-		"list":   list,
-	})
-}
-
-func (p *Plugin) handleAdminAccountDetail(w http.ResponseWriter, r *http.Request) {
-	idStr := strings.TrimPrefix(r.URL.Path, "/admin/accounts/")
-	idStr = strings.TrimSuffix(idStr, "/")
-	id, err := ParseAccountID(idStr)
-	if err != nil {
-		writeJSONErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	w0 := ParseWindow(r.URL.Query().Get("window"))
-	detail, err := p.agg.AccountHealthByID(r.Context(), id, w0)
-	if err != nil {
-		writeJSONErr(w, http.StatusNotFound, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, detail)
-}
-
 func (p *Plugin) handleAdminGroups(w http.ResponseWriter, r *http.Request) {
 	w0 := ParseWindow(r.URL.Query().Get("window"))
 	list, err := p.agg.GroupHealthList(r.Context(), w0, false)
@@ -171,10 +138,28 @@ func (p *Plugin) handleAdminGroups(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleAdminGroupDetail 单分组详情：基础信息 + 聚合 + 90 天日桶。
+func (p *Plugin) handleAdminGroupDetail(w http.ResponseWriter, r *http.Request) {
+	idStr := strings.TrimPrefix(r.URL.Path, "/admin/groups/")
+	idStr = strings.TrimSuffix(idStr, "/")
+	id, err := ParseGroupID(idStr)
+	if err != nil {
+		writeJSONErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w0 := ParseWindow(r.URL.Query().Get("window"))
+	detail, err := p.agg.GroupHealthByID(r.Context(), id, w0)
+	if err != nil {
+		writeJSONErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
 func (p *Plugin) handleAdminProbeGroup(w http.ResponseWriter, r *http.Request) {
 	idStr := strings.TrimPrefix(r.URL.Path, "/admin/probe/group/")
 	idStr = strings.TrimSuffix(idStr, "/")
-	id, err := ParseAccountID(idStr) // 复用：解析正整数
+	id, err := ParseGroupID(idStr)
 	if err != nil {
 		writeJSONErr(w, http.StatusBadRequest, "无效的分组 ID")
 		return
@@ -186,6 +171,11 @@ func (p *Plugin) handleAdminProbeGroup(w http.ResponseWriter, r *http.Request) {
 			writeJSONErr(w, http.StatusNotFound, err.Error())
 			return
 		}
+		var hostNotReady *HostNotReadyError
+		if errors.As(err, &hostNotReady) {
+			writeJSONErr(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -193,7 +183,7 @@ func (p *Plugin) handleAdminProbeGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================================
-// public handlers（脱敏：不含 account_id 与 error_msg）
+// public handlers（脱敏：不含 group_id 与 error_msg）
 // ============================================================================
 
 // handlePublicSummary 公开状态页的数据接口。
@@ -202,15 +192,18 @@ func (p *Plugin) handleAdminProbeGroup(w http.ResponseWriter, r *http.Request) {
 //   - 只暴露 group 维度（group_name + platform + 状态 + 备注 + 90 天方格图），
 //     让订阅了具体分组的用户能识别自己使用的渠道是否受影响。
 //   - 备注本身就是面向用户的运维说明（管理员在「分组管理」页填写）。
-//   - 不返回 account_id / account name / error_msg。
-//   - 旧的"按 platform 维度聚合"已下线：平台维度对终端用户无意义（用户订阅的是
-//     具体分组而不是 platform），且与分组列表内容重复。
+//   - 不返回 group_id 不是严格必须的（group_id 本身不敏感），但继续保留
+//     以便前端缓存键使用。error_msg 仍然过滤掉。
 func (p *Plugin) handlePublicSummary(w http.ResponseWriter, r *http.Request) {
 	w0 := ParseWindow(r.URL.Query().Get("window"))
 	groups, err := p.agg.GroupHealthList(r.Context(), w0, true)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "服务暂不可用")
 		return
+	}
+	// 脱敏：置空 last_error，避免泄漏 upstream 错误细节给公众
+	for i := range groups {
+		groups[i].LastError = ""
 	}
 	if groups == nil {
 		groups = []GroupHealth{}

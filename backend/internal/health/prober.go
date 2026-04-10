@@ -7,30 +7,41 @@ import (
 	"math/rand"
 	"sync"
 	"time"
+
+	sdk "github.com/DouDOU-start/airgate-sdk"
 )
 
-// prober.go：周期性主动探测器。
+// prober.go：分组级主动探测器（Step 2 重写）。
 //
 // 工作循环：
-//  1. 从 core accounts 表拉所有 status != 'disabled' 的账号（按 platform 分桶）。
-//  2. 用 worker pool（受 concurrency 限制）对每个账号调用 CoreClient.TestAccount。
-//  3. 把结果写一行到 health_probes。
-//  4. 抖动避免雪崩。
+//  1. 通过 sdk.Host.ListGroups() 拿到 core 当前所有分组
+//  2. 用 worker pool（受 concurrency 限制）对每个分组调 sdk.Host.ProbeForward
+//     —— 这是 core 侧"调度选号 + gateway.Forward + scheduler.ReportResult"
+//     的包装，跳过 usage_log 写入和用户余额扣款，但让账号状态机受益
+//  3. 把结果写一行到 group_health_probes
+//  4. 抖动避免雪崩
+//
+// 与 Step 1 之前的 v1 实现的关键差异：
+//   - 目标从账号粒度变成分组粒度（数量骤减：N 账号 → M 分组，M << N）
+//   - 不再通过 admin HTTP API 调 /admin/accounts/:id/test
+//   - 不再需要 admin_api_key 配置，走 hashicorp/go-plugin GRPCBroker 反向通道
+//   - 探测走和真实用户请求**完全相同的路径**（scheduler.SelectAccount →
+//     gateway.Forward），因此 uptime 直接反映"真实用户此刻能不能用"
 //
 // 不在这里实现 leader election：与 airgate 当前部署一致（单实例假设）。
-// 多副本部署如果部署多份本插件，会出现重复探测——但因为表只是 append，
-// 数据正确性不受影响，只是浪费上游配额。如果未来需要可在这里加 SET-NX。
+// 多副本部署如果部署多份本插件，会出现重复探测——但表只是 append，数据正确性
+// 不受影响，只是浪费上游配额。
 
 type ProberOptions struct {
-	Interval    time.Duration // 主循环间隔；默认 60s
-	Concurrency int           // 同时进行的 TestAccount 调用上限；默认 8
-	Jitter      time.Duration // 在每次循环开头随机等待 [0, Jitter)，避免和外部 cron 对齐；默认 5s
+	Interval    time.Duration // 主循环间隔；默认 300s（5 分钟）
+	Concurrency int           // 同时进行的 ProbeForward 上限；默认 4
+	Jitter      time.Duration // 每次循环开头随机等待 [0, Jitter)；默认 5s
 }
 
 func defaultProberOptions() ProberOptions {
 	return ProberOptions{
-		Interval:    60 * time.Second,
-		Concurrency: 8,
+		Interval:    5 * time.Minute,
+		Concurrency: 4,
 		Jitter:      5 * time.Second,
 	}
 }
@@ -38,7 +49,7 @@ func defaultProberOptions() ProberOptions {
 type Prober struct {
 	logger *slog.Logger
 	db     *sql.DB
-	client *CoreClient
+	host   sdk.Host
 	opts   ProberOptions
 
 	mu       sync.Mutex
@@ -47,12 +58,16 @@ type Prober struct {
 	doneChan chan struct{}
 }
 
-func NewProber(logger *slog.Logger, db *sql.DB, client *CoreClient, opts ProberOptions) *Prober {
+// NewProber 构造分组级探测器。
+//
+// host 是 sdk.HostAware 暴露的 core 反向调用接口；nil 时 Start 会变成 no-op
+// （插件以"未启用探测"模式运行，aggregator 仍可读历史数据）。
+func NewProber(logger *slog.Logger, db *sql.DB, host sdk.Host, opts ProberOptions) *Prober {
 	if opts.Interval <= 0 {
-		opts.Interval = 60 * time.Second
+		opts.Interval = 5 * time.Minute
 	}
 	if opts.Concurrency <= 0 {
-		opts.Concurrency = 8
+		opts.Concurrency = 4
 	}
 	if opts.Jitter < 0 {
 		opts.Jitter = 5 * time.Second
@@ -60,13 +75,18 @@ func NewProber(logger *slog.Logger, db *sql.DB, client *CoreClient, opts ProberO
 	return &Prober{
 		logger: logger.With("component", "prober"),
 		db:     db,
-		client: client,
+		host:   host,
 		opts:   opts,
 	}
 }
 
 // Start 启动探测主循环。可重复调用，已运行时是 no-op。
+// host == nil 时立刻返回（插件配置不完整时允许跳过）。
 func (p *Prober) Start(parent context.Context) {
+	if p.host == nil {
+		p.logger.Warn("host service 不可用，探测循环不会启动")
+		return
+	}
 	p.mu.Lock()
 	if p.running {
 		p.mu.Unlock()
@@ -98,9 +118,9 @@ func (p *Prober) Stop() {
 func (p *Prober) loop(parent context.Context) {
 	defer close(p.doneChan)
 
-	// 启动后短暂延迟一次，避免 core 还在装载其它插件时立刻打 TestAccount
+	// 启动后短暂延迟一次，避免 core 还在装载其它插件时立刻打探测
 	select {
-	case <-time.After(2 * time.Second):
+	case <-time.After(3 * time.Second):
 	case <-p.stopChan:
 		return
 	case <-parent.Done():
@@ -134,31 +154,24 @@ func (p *Prober) loop(parent context.Context) {
 	}
 }
 
-// targetAccount 探测目标的最小视图。
-type targetAccount struct {
-	ID       int64
-	Platform string
-}
-
-// RunOnce 跑一轮探测：拉账号 → worker pool 并发探测 → 落库。
+// RunOnce 跑一轮探测：拉分组 → worker pool 并发探测 → 落库。
 //
-// 返回 error 仅在"无法拉账号"等致命错误时；单个 TestAccount 失败不会冒泡，
-// 而是作为一行 success=false 写入 health_probes。
+// 返回 error 仅在"无法拉分组"等致命错误时；单个 ProbeForward 失败不会冒泡，
+// 而是作为一行 success=false 写入 group_health_probes。
 func (p *Prober) RunOnce(ctx context.Context) error {
-	targets, err := p.loadTargets(ctx)
+	groups, err := p.host.ListGroups(ctx)
 	if err != nil {
 		return err
 	}
-	if len(targets) == 0 {
+	if len(groups) == 0 {
 		return nil
 	}
 
-	p.logger.Debug("开始本轮探测", "targets", len(targets), "concurrency", p.opts.Concurrency)
+	p.logger.Debug("开始本轮分组探测", "groups", len(groups), "concurrency", p.opts.Concurrency)
 
-	// 3. worker pool
 	sem := make(chan struct{}, p.opts.Concurrency)
 	var wg sync.WaitGroup
-	for _, t := range targets {
+	for _, g := range groups {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -167,135 +180,129 @@ func (p *Prober) RunOnce(ctx context.Context) error {
 		default:
 		}
 
-		t := t // capture
+		g := g // capture
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			res := p.client.TestAccount(ctx, t.ID)
-			if err := p.recordProbe(ctx, t, res); err != nil {
-				p.logger.Warn("写入 probe 失败", "account_id", t.ID, "error", err)
-			}
+			p.probeAndRecord(ctx, g)
 		}()
 	}
 	wg.Wait()
 	return nil
 }
 
-// loadTargets 从 core accounts 表拉取所有需要探测的账号。
-// status='disabled' 的账号被排除（管理员明确关掉的）；
-// 其余包括 active 和 error 状态——保留 error 是为了能检测到恢复。
-func (p *Prober) loadTargets(ctx context.Context) ([]targetAccount, error) {
-	rows, err := p.db.QueryContext(ctx, `SELECT id, platform FROM accounts WHERE status != 'disabled'`)
+// probeAndRecord 对单个分组执行一次 ProbeForward 并写一行 group_health_probes。
+// ProbeForward 永远返回 (*result, nil) —— 失败信息在 result 字段里，不抛 error。
+func (p *Prober) probeAndRecord(ctx context.Context, g sdk.HostGroup) {
+	res, err := p.host.ProbeForward(ctx, sdk.HostProbeForwardRequest{GroupID: g.ID})
 	if err != nil {
-		return nil, err
+		// gRPC 级别错误（极少发生：broker 挂了、context 取消等），
+		// 作为一行 error_kind=rpc_error 写入，便于诊断
+		p.logger.Warn("ProbeForward RPC 失败", "group_id", g.ID, "error", err)
+		_ = p.insertProbeRow(ctx, g, nil, "rpc_error", err.Error())
+		return
 	}
-	defer rows.Close()
-	var out []targetAccount
-	for rows.Next() {
-		var t targetAccount
-		if err := rows.Scan(&t.ID, &t.Platform); err != nil {
-			return nil, err
-		}
-		out = append(out, t)
+	if err := p.insertProbeRow(ctx, g, res, "", ""); err != nil {
+		p.logger.Warn("写入 probe 失败", "group_id", g.ID, "error", err)
 	}
-	return out, rows.Err()
 }
 
-// recordProbe 把 ProbeResult 落到 health_probes 表（一行）。
-func (p *Prober) recordProbe(ctx context.Context, t targetAccount, r ProbeResult) error {
+// insertProbeRow 往 group_health_probes 写一行。
+// res 可以为 nil（RPC 错误时），此时 errKind/errMsg 由调用方提供。
+func (p *Prober) insertProbeRow(ctx context.Context, g sdk.HostGroup, res *sdk.HostProbeForwardResult, overrideKind, overrideMsg string) error {
+	var (
+		success    bool
+		latencyMs  int64
+		statusCode int64
+		accountID  int64
+		model      string
+		errKind    = overrideKind
+		errMsg     = overrideMsg
+	)
+	if res != nil {
+		success = res.Success
+		latencyMs = res.LatencyMs
+		statusCode = res.StatusCode
+		accountID = res.AccountID
+		model = res.Model
+		if errKind == "" {
+			errKind = res.ErrorKind
+		}
+		if errMsg == "" {
+			errMsg = res.ErrorMsg
+		}
+	}
 	_, err := p.db.ExecContext(ctx, `
-		INSERT INTO health_probes
-			(account_id, platform, probed_at, success, latency_ms, status_code, error_kind, error_msg)
-		VALUES ($1, $2, NOW(), $3, $4, $5, $6, $7)
-	`, t.ID, t.Platform, r.Success, r.LatencyMS, r.StatusCode, r.ErrorKind, r.ErrorMsg)
+		INSERT INTO group_health_probes
+			(group_id, platform, probed_at, success, latency_ms, status_code, account_id, model, error_kind, error_msg)
+		VALUES ($1, $2, NOW(), $3, $4, $5, $6, $7, $8, $9)
+	`, g.ID, g.Platform, success, latencyMs, statusCode, accountID, model, errKind, errMsg)
 	return err
 }
 
-// GroupProbeResult 一次分组探测的聚合结果，给前端展示。
+// ============================================================================
+// 手动探测（前端"立即探测"按钮）
+// ============================================================================
+
+// GroupProbeResult 一次手动分组探测的结果，给前端展示。
+//
+// 与 Step 1 之前的版本相比字段简化：分组级探测每次只发一次请求，
+// 不再有 Total/Success/Failed 的聚合概念。保留 DurationMS 让前端展示耗时。
 type GroupProbeResult struct {
-	GroupID    int64 `json:"group_id"`
-	Total      int   `json:"total"`       // 实际探测的账号数
-	Success    int   `json:"success"`     // 成功数
-	Failed     int   `json:"failed"`      // 失败数
-	DurationMS int64 `json:"duration_ms"` // 整轮耗时
+	GroupID    int64  `json:"group_id"`
+	Success    bool   `json:"success"`
+	LatencyMS  int64  `json:"latency_ms"`
+	AccountID  int64  `json:"account_id,omitempty"` // 本次命中的账号（运维诊断）
+	Model      string `json:"model,omitempty"`      // 探测用的 model
+	ErrorKind  string `json:"error_kind,omitempty"`
+	ErrorMsg   string `json:"error_msg,omitempty"`
+	DurationMS int64  `json:"duration_ms"`
 }
 
-// ProbeGroup 手动探测一个分组下所有非 disabled 账号；admin 路由触发。
-// 并发受 prober 全局 concurrency 限制。每个账号的结果会落到 health_probes 表，
-// 然后返回汇总给前端展示一条 toast。
+// ProbeGroup 手动探测单个分组；admin 路由触发。
+// 结果会落到 group_health_probes 表，然后返回结构体给前端展示 toast。
 func (p *Prober) ProbeGroup(ctx context.Context, groupID int64) (GroupProbeResult, error) {
-	// 校验分组存在
-	var exists bool
-	if err := p.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1)`, groupID,
-	).Scan(&exists); err != nil {
-		return GroupProbeResult{}, err
-	}
-	if !exists {
-		return GroupProbeResult{}, &GroupNotFoundError{ID: groupID}
+	if p.host == nil {
+		return GroupProbeResult{}, &HostNotReadyError{}
 	}
 
-	// 拉取分组下所有非 disabled 账号
-	rows, err := p.db.QueryContext(ctx, `
-		SELECT a.id, a.platform
-		FROM accounts a
-		JOIN account_groups ag ON ag.account_id = a.id
-		WHERE ag.group_id = $1 AND a.status != 'disabled'
-	`, groupID)
+	// 先确认这个 group 存在（通过 ListGroups 拿 platform，顺便校验）
+	groups, err := p.host.ListGroups(ctx)
 	if err != nil {
 		return GroupProbeResult{}, err
 	}
-	defer rows.Close()
-	var targets []targetAccount
-	for rows.Next() {
-		var t targetAccount
-		if err := rows.Scan(&t.ID, &t.Platform); err != nil {
-			return GroupProbeResult{}, err
+	var target *sdk.HostGroup
+	for i := range groups {
+		if groups[i].ID == groupID {
+			target = &groups[i]
+			break
 		}
-		targets = append(targets, t)
 	}
-	if err := rows.Err(); err != nil {
-		return GroupProbeResult{}, err
+	if target == nil {
+		return GroupProbeResult{}, &GroupNotFoundError{ID: groupID}
 	}
 
 	start := time.Now()
-	out := GroupProbeResult{GroupID: groupID, Total: len(targets)}
-	if len(targets) == 0 {
-		out.DurationMS = time.Since(start).Milliseconds()
-		return out, nil
+	res, err := p.host.ProbeForward(ctx, sdk.HostProbeForwardRequest{GroupID: groupID})
+	if err != nil {
+		_ = p.insertProbeRow(ctx, *target, nil, "rpc_error", err.Error())
+		return GroupProbeResult{}, err
 	}
+	_ = p.insertProbeRow(ctx, *target, res, "", "")
 
-	sem := make(chan struct{}, p.opts.Concurrency)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	for _, t := range targets {
-		t := t
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			res := p.client.TestAccount(ctx, t.ID)
-			if err := p.recordProbe(ctx, t, res); err != nil {
-				p.logger.Warn("写入 probe 失败", "account_id", t.ID, "error", err)
-			}
-			mu.Lock()
-			if res.Success {
-				out.Success++
-			} else {
-				out.Failed++
-			}
-			mu.Unlock()
-		}()
-	}
-	wg.Wait()
-
-	out.DurationMS = time.Since(start).Milliseconds()
-	return out, nil
+	return GroupProbeResult{
+		GroupID:    groupID,
+		Success:    res.Success,
+		LatencyMS:  res.LatencyMs,
+		AccountID:  res.AccountID,
+		Model:      res.Model,
+		ErrorKind:  res.ErrorKind,
+		ErrorMsg:   res.ErrorMsg,
+		DurationMS: time.Since(start).Milliseconds(),
+	}, nil
 }
 
 // GroupNotFoundError 分组探测时分组不存在。
@@ -303,4 +310,11 @@ type GroupNotFoundError struct{ ID int64 }
 
 func (e *GroupNotFoundError) Error() string {
 	return "分组不存在"
+}
+
+// HostNotReadyError 插件还没拿到 host service（通常是 Core 太老 / 未启用 HostService）。
+type HostNotReadyError struct{}
+
+func (e *HostNotReadyError) Error() string {
+	return "HostService 未就绪：core 版本过旧或 host service 未注入"
 }
