@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
 
 	sdk "github.com/DouDOU-start/airgate-sdk"
@@ -12,8 +13,9 @@ import (
 
 // HTTP header（与 core/extension_proxy.go 注入的头一致）
 const (
-	headerEntry = "X-Airgate-Entry" // admin / user / callback / public
-	headerRole  = "X-Airgate-Role"  // admin / user
+	headerEntry  = "X-Airgate-Entry"   // admin / user / callback / public
+	headerRole   = "X-Airgate-Role"    // admin / user
+	headerUserID = "X-Airgate-User-ID" // 登录用户 ID；匿名 / admin-API-key 场景为空或 0
 )
 
 // registerRoutes 把所有 handler 挂到 sdk.RouteRegistrar 上。
@@ -32,6 +34,9 @@ const (
 //	  GET    /api/summary                       脱敏的分组维度聚合（含备注、90 天方格图）
 //	  GET    /assets/                           静态资源前缀
 //
+//	user 入口   (/api/v1/ext-user/airgate-health/user/summary → 插件看到 /user/summary)
+//	  GET    /user/summary                      已登录用户的状态页数据：公开分组 ∪ 自己被授权的专属分组
+//
 // Step 2 变更：删除 /admin/accounts 和 /admin/accounts/{id}；探测粒度改为分组级，
 // 账号详情不再属于本插件职责。
 func (p *Plugin) registerRoutes(r sdk.RouteRegistrar) {
@@ -40,6 +45,9 @@ func (p *Plugin) registerRoutes(r sdk.RouteRegistrar) {
 	r.Handle(http.MethodGet, "/admin/groups", p.requireAdmin(p.requireConfigured(p.handleAdminGroups)))
 	r.Handle(http.MethodGet, "/admin/groups/", p.requireAdmin(p.requireConfigured(p.handleAdminGroupDetail))) // 前缀匹配 /admin/groups/{id}
 	r.Handle(http.MethodPost, "/admin/probe/group/", p.requireAdmin(p.requireConfigured(p.handleAdminProbeGroup)))
+
+	// === user（通过 core /api/v1/ext-user/airgate-health/* 反向代理；要求登录）===
+	r.Handle(http.MethodGet, "/user/summary", p.requireUser(p.requireConfigured(p.handleUserSummary)))
 
 	// === public（通过 core /status/* 反向代理；core 已剥掉 /status 前缀）===
 	r.Handle(http.MethodGet, "/api/summary", p.requirePublic(p.requireConfigured(p.handlePublicSummary)))
@@ -92,6 +100,24 @@ func (p *Plugin) requirePublic(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// requireUser 仅允许 X-Airgate-Entry=user（由 core /api/v1/ext-user 路由注入，
+// 该路由前置了 JWTAuth 中间件，无 token / token 失效会在 core 层直接 401）。
+// 进到这里的请求必然携带合法的 user 身份，但仍需要 X-Airgate-User-ID 非零。
+// 也受 publicEnabled 开关控制：公开状态页被关时，登录版入口也随之关闭，语义一致。
+func (p *Plugin) requireUser(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(headerEntry) != "user" {
+			writeJSONErr(w, http.StatusForbidden, "该接口仅允许通过 /api/v1/ext-user 入口访问")
+			return
+		}
+		if !p.publicEnabled.Load() {
+			http.NotFound(w, r)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // ============================================================================
 // admin handlers
 // ============================================================================
@@ -103,7 +129,7 @@ func (p *Plugin) handleOverview(w http.ResponseWriter, r *http.Request) {
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	groups, err := p.agg.GroupHealthList(r.Context(), w0, false, 0)
+	groups, err := p.agg.GroupHealthList(r.Context(), w0, false, 0, false, 0)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -124,7 +150,7 @@ func (p *Plugin) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 func (p *Plugin) handleAdminGroups(w http.ResponseWriter, r *http.Request) {
 	w0 := ParseWindow(r.URL.Query().Get("window"))
-	list, err := p.agg.GroupHealthList(r.Context(), w0, false, 0)
+	list, err := p.agg.GroupHealthList(r.Context(), w0, false, 0, false, 0)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -200,12 +226,50 @@ func (p *Plugin) handleAdminProbeGroup(w http.ResponseWriter, r *http.Request) {
 // 5 分钟探测样本），能区分小时级抖动。
 func (p *Plugin) handlePublicSummary(w http.ResponseWriter, r *http.Request) {
 	w0 := ParseWindow(r.URL.Query().Get("window"))
-	groups, err := p.agg.GroupHealthList(r.Context(), w0, false, 168)
+	// publicOnly=true + userID=0：只展示 g.status_visible=TRUE 的分组；
+	// 专属/被隐藏的分组对匿名访客不可见（登录用户走 handleUserSummary 获取追加的专属分组）。
+	groups, err := p.agg.GroupHealthList(r.Context(), w0, false, 168, true, 0)
 	if err != nil {
 		writeJSONErr(w, http.StatusInternalServerError, "服务暂不可用")
 		return
 	}
 	// 脱敏：置空 last_error，避免泄漏 upstream 错误细节给公众
+	for i := range groups {
+		groups[i].LastError = ""
+	}
+	if groups == nil {
+		groups = []GroupHealth{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"window": w0.Name,
+		"groups": groups,
+	})
+}
+
+// handleUserSummary 已登录用户的状态页数据。
+//
+// 与 handlePublicSummary 的差异：
+//   - 除公开分组（status_visible=TRUE）外，追加展示当前用户在 user_allowed_groups 里
+//     被授权的专属分组（即使其 status_visible=false）——让专属用户能看到自己能用的
+//     分组的健康状况，哪怕管理员把该分组对外隐藏了。
+//   - 脱敏策略与公开页一致：last_error 置空，避免把 upstream 错误细节推给前端。
+//
+// 前端 /status 页会并行拉这个接口（401 视为未登录，静默忽略），把返回的专属分组与
+// 公开接口的分组合并去重渲染，对用户的直觉是"登录后自动多看见几个专属分组"。
+func (p *Plugin) handleUserSummary(w http.ResponseWriter, r *http.Request) {
+	// X-Airgate-User-ID 解析失败 / 为 0：当作未登录处理，退回公开视图语义。
+	userID, _ := strconv.Atoi(r.Header.Get(headerUserID))
+	if userID <= 0 {
+		writeJSONErr(w, http.StatusUnauthorized, "需要登录")
+		return
+	}
+
+	w0 := ParseWindow(r.URL.Query().Get("window"))
+	groups, err := p.agg.GroupHealthList(r.Context(), w0, false, 168, true, userID)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, "服务暂不可用")
+		return
+	}
 	for i := range groups {
 		groups[i].LastError = ""
 	}

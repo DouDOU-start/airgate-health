@@ -51,13 +51,40 @@ export default function StatusPage() {
     document.body.style.fontFamily = cssVar('fontSans');
   }, []);
 
+  // 并行拉两份数据：
+  //   1. /status/api/summary —— 匿名公开视图（status_visible=TRUE 的分组）
+  //   2. /api/v1/ext-user/airgate-health/user/summary —— 登录用户追加视图
+  //      （公开分组 + 自己被授权的专属分组，哪怕 status_visible=false）
+  // 登录态判断：复用主应用 localStorage.token；无 token 或 401 都静默忽略第二份，
+  // 视作未登录，仅渲染公开视图。登录用户返回的数据会按 group_id 合并去重覆盖。
   const reload = () => {
-    fetch('/status/api/summary?window=7d')
-      .then((r) => {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
+    const publicPromise = fetch('/status/api/summary?window=7d').then((r) => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json() as Promise<Summary>;
+    });
+
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    const userPromise: Promise<Summary | null> = token
+      ? fetch('/api/v1/ext-user/airgate-health/user/summary?window=7d', {
+          headers: { Authorization: `Bearer ${token}` },
+        }).then((r) => (r.ok ? (r.json() as Promise<Summary>) : null))
+      : Promise.resolve(null);
+
+    Promise.all([publicPromise, userPromise.catch(() => null)])
+      .then(([publicData, userData]) => {
+        if (!userData) {
+          setData(publicData);
+          return;
+        }
+        // 以 public 为基线，用 user 视图覆盖/追加——user 视图里的专属分组优先。
+        const byID = new Map<number, GroupHealth>();
+        for (const g of publicData.groups) byID.set(g.group_id, g);
+        for (const g of userData.groups) byID.set(g.group_id, g);
+        setData({
+          window: publicData.window,
+          groups: Array.from(byID.values()),
+        });
       })
-      .then(setData)
       .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
   };
 

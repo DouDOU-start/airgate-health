@@ -289,8 +289,29 @@ func (a *Aggregator) fillMissingPlatforms(ctx context.Context, out *[]PlatformHe
 //
 // hourlyHours > 0 时额外填充 GroupHealth.Hourly（按小时分桶，最近 N 小时）。
 // 公开状态页传 168（7 天 × 24 小时）；admin 视图传 0 跳过。
-func (a *Aggregator) GroupHealthList(ctx context.Context, w Window, includeDaily bool, hourlyHours int) ([]GroupHealth, error) {
+//
+// 可见性过滤三档：
+//   - publicOnly=false：不过滤（admin 视图，看到全部分组）
+//   - publicOnly=true, userID=0：仅 g.status_visible = TRUE（匿名公开页）
+//   - publicOnly=true, userID>0：上一条 OR 用户在 user_allowed_groups 里有记录
+//     （登录用户，看到公开分组 + 自己被授权的专属分组，哪怕该专属分组 status_visible=false）
+func (a *Aggregator) GroupHealthList(ctx context.Context, w Window, includeDaily bool, hourlyHours int, publicOnly bool, userID int) ([]GroupHealth, error) {
 	since := time.Now().AddDate(0, 0, -w.Days)
+
+	visibilityFilter := ""
+	args := []interface{}{since}
+	if publicOnly {
+		if userID > 0 {
+			// $2 是 userID；EXISTS 子查询命中 (user_id, group_id) 主键索引，成本 O(1)。
+			visibilityFilter = `WHERE g.status_visible = TRUE OR EXISTS (
+				SELECT 1 FROM user_allowed_groups uag
+				WHERE uag.user_id = $2 AND uag.group_id = g.id
+			)`
+			args = append(args, userID)
+		} else {
+			visibilityFilter = "WHERE g.status_visible = TRUE"
+		}
+	}
 
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT
@@ -300,9 +321,10 @@ func (a *Aggregator) GroupHealthList(ctx context.Context, w Window, includeDaily
 			MAX(p.probed_at) AS last_at
 		FROM groups g
 		LEFT JOIN group_health_probes p ON p.group_id = g.id AND p.probed_at >= $1
+		`+visibilityFilter+`
 		GROUP BY g.id, g.name, g.platform, g.note
 		ORDER BY g.platform, g.name
-	`, since)
+	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("聚合 group 健康失败: %w", err)
 	}
