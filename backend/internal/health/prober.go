@@ -3,6 +3,7 @@ package health
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"sync"
@@ -56,6 +57,11 @@ type Prober struct {
 	running  bool
 	stopChan chan struct{}
 	doneChan chan struct{}
+
+	// failureMu 保护 consecutiveFailures；用于聚合"连续失败 → unhealthy/recovered"日志事件。
+	// 仅影响日志，不影响数据落库或调度状态。
+	failureMu           sync.Mutex
+	consecutiveFailures map[int64]int
 }
 
 // NewProber 构造分组级探测器。
@@ -167,7 +173,10 @@ func (p *Prober) RunOnce(ctx context.Context) error {
 		return nil
 	}
 
-	p.logger.Debug("开始本轮分组探测", "groups", len(groups), "concurrency", p.opts.Concurrency)
+	p.logger.Debug("health_probe_round_start",
+		"groups", len(groups),
+		"concurrency", p.opts.Concurrency,
+	)
 
 	sem := make(chan struct{}, p.opts.Concurrency)
 	var wg sync.WaitGroup
@@ -197,16 +206,94 @@ func (p *Prober) RunOnce(ctx context.Context) error {
 // probeAndRecord 对单个分组执行一次 ProbeForward 并写一行 group_health_probes。
 // ProbeForward 永远返回 (*result, nil) —— 失败信息在 result 字段里，不抛 error。
 func (p *Prober) probeAndRecord(ctx context.Context, g sdk.HostGroup) {
+	target := fmt.Sprintf("group:%d", g.ID)
+	p.logger.Debug("health_probe_start",
+		"target", target,
+		sdk.LogFieldGroupID, g.ID,
+		sdk.LogFieldPlatform, g.Platform,
+	)
+	start := time.Now()
 	res, err := p.host.ProbeForward(ctx, sdk.HostProbeForwardRequest{GroupID: g.ID})
 	if err != nil {
 		// gRPC 级别错误（极少发生：broker 挂了、context 取消等），
 		// 作为一行 error_kind=rpc_error 写入，便于诊断
-		p.logger.Warn("ProbeForward RPC 失败", "group_id", g.ID, "error", err)
+		p.logger.Warn("health_probe_failed",
+			"target", target,
+			sdk.LogFieldGroupID, g.ID,
+			sdk.LogFieldPlatform, g.Platform,
+			"error_kind", "rpc_error",
+			sdk.LogFieldError, err,
+		)
 		_ = p.insertProbeRow(ctx, g, nil, "rpc_error", err.Error())
+		p.handleProbeOutcome(ctx, g, false)
 		return
 	}
+	durationMs := time.Since(start).Milliseconds()
+	p.logger.Debug("health_probe_completed",
+		"target", target,
+		sdk.LogFieldGroupID, g.ID,
+		sdk.LogFieldPlatform, g.Platform,
+		sdk.LogFieldStatus, res.StatusCode,
+		sdk.LogFieldDurationMs, durationMs,
+		"success", res.Success,
+	)
+	if !res.Success {
+		p.logger.Warn("health_probe_failed",
+			"target", target,
+			sdk.LogFieldGroupID, g.ID,
+			sdk.LogFieldPlatform, g.Platform,
+			"error_kind", res.ErrorKind,
+			sdk.LogFieldError, res.ErrorMsg,
+			sdk.LogFieldStatus, res.StatusCode,
+			sdk.LogFieldDurationMs, durationMs,
+		)
+	}
 	if err := p.insertProbeRow(ctx, g, res, "", ""); err != nil {
-		p.logger.Warn("写入 probe 失败", "group_id", g.ID, "error", err)
+		p.logger.Error("health_probe_persist_failed",
+			"target", target,
+			sdk.LogFieldGroupID, g.ID,
+			sdk.LogFieldError, err,
+		)
+	}
+	p.handleProbeOutcome(ctx, g, res.Success)
+}
+
+// handleProbeOutcome 跟踪连续失败次数 → 触发 unhealthy / recovered 事件。
+//
+// 仅做日志聚合，不影响探测落库与状态机。计数保存在内存里：
+//   - 进程重启后从 0 开始（第一轮探测的恢复事件可能"丢失"，但这只是日志噪声，
+//     与持久状态无关）
+//   - 多副本部署也各自记自己的计数；这与 prober 本身没有 leader election 一致
+const probeUnhealthyThreshold = 3
+
+func (p *Prober) handleProbeOutcome(_ context.Context, g sdk.HostGroup, success bool) {
+	target := fmt.Sprintf("group:%d", g.ID)
+	p.failureMu.Lock()
+	defer p.failureMu.Unlock()
+	if p.consecutiveFailures == nil {
+		p.consecutiveFailures = make(map[int64]int)
+	}
+	prev := p.consecutiveFailures[g.ID]
+	if success {
+		if prev >= probeUnhealthyThreshold {
+			p.logger.Info("health_target_recovered",
+				"target", target,
+				sdk.LogFieldGroupID, g.ID,
+				sdk.LogFieldPlatform, g.Platform,
+			)
+		}
+		delete(p.consecutiveFailures, g.ID)
+		return
+	}
+	cur := prev + 1
+	p.consecutiveFailures[g.ID] = cur
+	if cur == probeUnhealthyThreshold {
+		p.logger.Error("health_target_unhealthy",
+			"target", target,
+			sdk.LogFieldGroupID, g.ID,
+			sdk.LogFieldPlatform, g.Platform,
+			"consecutive_failures", cur,
+		)
 	}
 }
 
@@ -285,12 +372,36 @@ func (p *Prober) ProbeGroup(ctx context.Context, groupID int64) (GroupProbeResul
 		return GroupProbeResult{}, &GroupNotFoundError{ID: groupID}
 	}
 
+	manualTarget := fmt.Sprintf("group:%d", groupID)
+	p.logger.Debug("health_probe_start",
+		"target", manualTarget,
+		sdk.LogFieldGroupID, groupID,
+		sdk.LogFieldPlatform, target.Platform,
+		"manual", true,
+	)
 	start := time.Now()
 	res, err := p.host.ProbeForward(ctx, sdk.HostProbeForwardRequest{GroupID: groupID})
 	if err != nil {
+		p.logger.Warn("health_probe_failed",
+			"target", manualTarget,
+			sdk.LogFieldGroupID, groupID,
+			sdk.LogFieldPlatform, target.Platform,
+			"error_kind", "rpc_error",
+			"manual", true,
+			sdk.LogFieldError, err,
+		)
 		_ = p.insertProbeRow(ctx, *target, nil, "rpc_error", err.Error())
 		return GroupProbeResult{}, err
 	}
+	p.logger.Debug("health_probe_completed",
+		"target", manualTarget,
+		sdk.LogFieldGroupID, groupID,
+		sdk.LogFieldPlatform, target.Platform,
+		sdk.LogFieldStatus, res.StatusCode,
+		sdk.LogFieldDurationMs, time.Since(start).Milliseconds(),
+		"success", res.Success,
+		"manual", true,
+	)
 	_ = p.insertProbeRow(ctx, *target, res, "", "")
 
 	return GroupProbeResult{
