@@ -283,15 +283,13 @@ func (p *Plugin) handleUserSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePublicIndex 返回 webdist/status.html（独立打包的状态页 HTML）。
-// 如果 webdist 没有 status.html，返回最小化的内嵌 HTML 占位。
 func (p *Plugin) handlePublicIndex(w http.ResponseWriter, _ *http.Request) {
 	if data, ok := p.readAsset("status.html"); ok {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(data)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(fallbackStatusHTML))
+	http.Error(w, "status.html not found; build airgate-health web assets first", http.StatusServiceUnavailable)
 }
 
 // handlePublicAsset serves /assets/* 静态资源（core 已经剥掉了 /status 前缀）。
@@ -317,54 +315,6 @@ func (p *Plugin) handlePublicAsset(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = w.Write(data)
 }
-
-// fallbackStatusHTML 当插件 webdist 还没有 status.html 时返回的最小占位页。
-// 包含一段 inline JS 调用 /status/api/summary 渲染最基础的卡片。
-const fallbackStatusHTML = `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<title>服务状态</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  body { font-family: -apple-system, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 16px; color: #1f2937; background: #f9fafb; }
-  h1 { font-size: 24px; margin-bottom: 8px; }
-  .card { background: white; padding: 16px; border-radius: 8px; margin: 12px 0; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
-  .row { display: flex; justify-content: space-between; align-items: center; }
-  .name { font-weight: 600; }
-  .pct { font-variant-numeric: tabular-nums; }
-  .note { margin-top: 4px; margin-left: 18px; color: #6b7280; font-size: 13px; white-space: pre-wrap; }
-  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: middle; }
-  .green { background: #10b981; } .yellow { background: #f59e0b; } .red { background: #ef4444; } .gray { background: #9ca3af; }
-  .meta { color: #6b7280; font-size: 13px; }
-</style>
-</head><body>
-<h1>服务状态</h1>
-<div class="meta">最近 7 天可用率（实时刷新）</div>
-<div id="root">加载中…</div>
-<script>
-fetch('/status/api/summary?window=7d').then(r=>r.json()).then(d=>{
-  var root = document.getElementById('root');
-  root.innerHTML = '';
-  function esc(s) { var p = document.createElement('p'); p.textContent = s == null ? '' : String(s); return p.innerHTML; }
-  (d.groups || []).forEach(function(g) {
-    var c = document.createElement('div'); c.className = 'card';
-    var pct = g.uptime_pct < 0 ? '--' : g.uptime_pct.toFixed(2) + '%';
-    c.innerHTML = '<div class="row"><span><span class="dot ' + (g.status_color||'gray') + '"></span><span class="name">' + esc(g.group_name) + '</span> <span class="meta">· ' + esc(g.platform) + '</span></span><span class="pct">' + pct + '</span></div>';
-    if (g.note) {
-      var n = document.createElement('div');
-      n.className = 'note';
-      n.textContent = g.note;
-      c.appendChild(n);
-    }
-    root.appendChild(c);
-  });
-  if (!(d.groups||[]).length) {
-    root.innerHTML = '<div class="meta">暂无监控数据</div>';
-  }
-}).catch(function(e){
-  document.getElementById('root').textContent = '加载失败: ' + e.message;
-});
-</script>
-</body></html>`
 
 // ============================================================================
 // 工具函数

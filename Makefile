@@ -50,7 +50,7 @@ ensure-webdist:
 
 # ===================== 开发 =====================
 
-dev: ## 提示如何在 core 里 dev 加载本插件
+dev: build-web ## 构建前端资产并提示如何在 core 里 dev 加载本插件
 	@echo "在 airgate-core/backend/config.yaml 的 plugins.dev 节追加："
 	@echo ""
 	@echo "  plugins:"

@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -107,9 +108,14 @@ func getEmbedAssetCache() map[string][]byte {
 }
 
 func loadDevAssets() map[string][]byte {
+	_, file, _, ok := runtime.Caller(0)
 	candidates := []string{
 		filepath.Join("..", "web", "dist"),
 		filepath.Join("web", "dist"),
+	}
+	if ok {
+		pluginRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+		candidates = append(candidates, filepath.Join(pluginRoot, "web", "dist"))
 	}
 	for _, dir := range candidates {
 		if a := loadAssetsFromDir(dir); len(a) > 0 {
