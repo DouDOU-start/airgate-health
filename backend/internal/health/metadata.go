@@ -1,7 +1,7 @@
 package health
 
 import (
-	sdk "github.com/DouDOU-start/airgate-sdk"
+	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 )
 
 const (
@@ -38,15 +38,15 @@ func BuildPluginInfo() sdk.PluginInfo {
 		Description: "AI 提供商健康监控：分组级黑盒探测、可用率/延迟聚合、对外公开状态页",
 		Author:      "AirGate",
 		Type:        sdk.PluginTypeExtension,
-		// 健康监控插件的核心能力是分组级黑盒探测，必须显式声明：
-		//   - host.list_groups   —— prober.RunOnce 遍历分组目标
-		//   - host.probe_forward —— 真正的探测请求执行
-		// 没声明任何一项都会被 core 的 capability interceptor 以 PermissionDenied 拒绝。
-		// 注：账号状态机反馈由 core 在 ProbeForward 内部完成，prober 不直接调
+		// 健康监控插件的核心能力是分组级黑盒探测，必须显式声明 host method：
+		//   - groups.list   —— prober.RunOnce 遍历分组目标
+		//   - probe.forward —— 真正的探测请求执行
+		// 没声明对应 host.invoke.<method> 会被 core 的 capability interceptor 以 PermissionDenied 拒绝。
+		// 注：账号状态机反馈由 core 在 probe.forward 内部完成，prober 不直接调
 		// host.report_account_result，所以这里不声明该 capability。
 		Capabilities: []sdk.Capability{
-			sdk.CapabilityHostListGroups,
-			sdk.CapabilityHostProbeForward,
+			sdk.CapabilityForHostMethod("groups.list"),
+			sdk.CapabilityForHostMethod("probe.forward"),
 		},
 
 		// 不再声明独立的 admin 前端页面：分组级可用率会由 core 的分组管理页直接展示，

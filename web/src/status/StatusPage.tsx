@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { cssVar } from '@airgate/theme';
+import { cssVar } from '@doudou-start/airgate-theme';
 
 // 公开状态页（无登录），独立打包，自带 React。
 //
@@ -7,7 +7,7 @@ import { cssVar } from '@airgate/theme';
 // 脱敏原则：只展示 platform 维度的可用率与状态色，不暴露任何 account_id / 错误详情。
 //
 // 主题：因为这是独立打包的 standalone 页面，没有 core 的 admin shell 注入 CSS vars。
-// 但 @airgate/theme 的 cssVar() helper 在 var() 中带有 darkTheme 的 fallback，
+// 但 @doudou-start/airgate-theme 的 cssVar() helper 在 var() 中带有 darkTheme 的 fallback，
 // 所以即使 :root 上没有 --ag-* 变量，页面也会以 darkTheme 渲染——这正是我们想要的，
 // 公开状态页天然采用品牌深色风格。
 

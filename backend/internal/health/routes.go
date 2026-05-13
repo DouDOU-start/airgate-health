@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	sdk "github.com/DouDOU-start/airgate-sdk"
+	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 )
 
 // HTTP header（与 core/extension_proxy.go 注入的头一致）

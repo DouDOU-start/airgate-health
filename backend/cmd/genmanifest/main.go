@@ -16,7 +16,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	sdk "github.com/DouDOU-start/airgate-sdk"
+	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 
 	"github.com/DouDOU-start/airgate-health/backend/internal/health"
 )

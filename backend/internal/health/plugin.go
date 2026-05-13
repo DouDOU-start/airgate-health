@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	sdk "github.com/DouDOU-start/airgate-sdk"
+	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 )
 
 // Plugin 是健康监控插件主体，实现 sdk.ExtensionPlugin。
@@ -266,4 +266,3 @@ func (p *Plugin) OnConfigUpdate(_ sdk.PluginConfig) error {
 	}
 	return p.Start(context.Background())
 }
-

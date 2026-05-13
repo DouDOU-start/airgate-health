@@ -3,20 +3,21 @@ package health
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math/rand"
 	"sync"
 	"time"
 
-	sdk "github.com/DouDOU-start/airgate-sdk"
+	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 )
 
 // prober.go：分组级主动探测器（Step 2 重写）。
 //
 // 工作循环：
-//  1. 通过 sdk.Host.ListGroups() 拿到 core 当前所有分组
-//  2. 用 worker pool（受 concurrency 限制）对每个分组调 sdk.Host.ProbeForward
+//  1. 通过 Host.Invoke("groups.list") 拿到 core 当前所有分组
+//  2. 用 worker pool（受 concurrency 限制）对每个分组调 Host.Invoke("probe.forward")
 //     —— 这是 core 侧"调度选号 + gateway.Forward + scheduler.ReportResult"
 //     的包装，跳过 usage_log 写入和用户余额扣款，但让账号状态机受益
 //  3. 把结果写一行到 group_health_probes
@@ -33,9 +34,32 @@ import (
 // 多副本部署如果部署多份本插件，会出现重复探测——但表只是 append，数据正确性
 // 不受影响，只是浪费上游配额。
 
+const (
+	hostMethodGroupsList   = "groups.list"
+	hostMethodProbeForward = "probe.forward"
+)
+
+type hostGroup struct {
+	ID             int64   `json:"id"`
+	Name           string  `json:"name"`
+	Platform       string  `json:"platform"`
+	IsExclusive    bool    `json:"is_exclusive"`
+	RateMultiplier float64 `json:"rate_multiplier"`
+}
+
+type hostProbeForwardResult struct {
+	Success    bool   `json:"success"`
+	LatencyMs  int64  `json:"latency_ms"`
+	StatusCode int64  `json:"status_code"`
+	AccountID  int64  `json:"account_id"`
+	Model      string `json:"model"`
+	ErrorKind  string `json:"error_kind"`
+	ErrorMsg   string `json:"error_msg"`
+}
+
 type ProberOptions struct {
 	Interval    time.Duration // 主循环间隔；默认 300s（5 分钟）
-	Concurrency int           // 同时进行的 ProbeForward 上限；默认 4
+	Concurrency int           // 同时进行的 probe.forward 上限；默认 4
 	Jitter      time.Duration // 每次循环开头随机等待 [0, Jitter)；默认 5s
 }
 
@@ -120,6 +144,73 @@ func (p *Prober) Stop() {
 	<-done
 }
 
+func (p *Prober) hostInvoke(ctx context.Context, method string, payload map[string]interface{}) (map[string]interface{}, error) {
+	if p.host == nil {
+		return nil, &HostNotReadyError{}
+	}
+	resp, err := p.host.Invoke(ctx, sdk.HostInvokeRequest{
+		Method:  method,
+		Payload: payload,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return map[string]interface{}{}, nil
+	}
+	if resp.Status == "error" {
+		if msg, _ := resp.Payload["message"].(string); msg != "" {
+			return nil, fmt.Errorf("%s", msg)
+		}
+		return nil, fmt.Errorf("core 方法 %s 返回错误", method)
+	}
+	return resp.Payload, nil
+}
+
+func decodeHostValue[T any](payload map[string]interface{}, out *T, keys ...string) error {
+	var raw interface{} = payload
+	for _, key := range keys {
+		if value, ok := payload[key]; ok {
+			raw = value
+			break
+		}
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p *Prober) listGroups(ctx context.Context) ([]hostGroup, error) {
+	payload, err := p.hostInvoke(ctx, hostMethodGroupsList, nil)
+	if err != nil {
+		return nil, err
+	}
+	var groups []hostGroup
+	if err := decodeHostValue(payload, &groups, "groups", "items", "data"); err != nil {
+		return nil, fmt.Errorf("解析 groups.list 响应失败: %w", err)
+	}
+	return groups, nil
+}
+
+func (p *Prober) probeForward(ctx context.Context, groupID int64) (*hostProbeForwardResult, error) {
+	payload, err := p.hostInvoke(ctx, hostMethodProbeForward, map[string]interface{}{
+		"group_id": groupID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result hostProbeForwardResult
+	if err := decodeHostValue(payload, &result); err != nil {
+		return nil, fmt.Errorf("解析 probe.forward 响应失败: %w", err)
+	}
+	return &result, nil
+}
+
 // loop 主循环：每 Interval 触发一次 RunOnce。
 func (p *Prober) loop(parent context.Context) {
 	defer close(p.doneChan)
@@ -162,10 +253,10 @@ func (p *Prober) loop(parent context.Context) {
 
 // RunOnce 跑一轮探测：拉分组 → worker pool 并发探测 → 落库。
 //
-// 返回 error 仅在"无法拉分组"等致命错误时；单个 ProbeForward 失败不会冒泡，
+// 返回 error 仅在"无法拉分组"等致命错误时；单个 probe.forward 失败不会冒泡，
 // 而是作为一行 success=false 写入 group_health_probes。
 func (p *Prober) RunOnce(ctx context.Context) error {
-	groups, err := p.host.ListGroups(ctx)
+	groups, err := p.listGroups(ctx)
 	if err != nil {
 		return err
 	}
@@ -203,9 +294,9 @@ func (p *Prober) RunOnce(ctx context.Context) error {
 	return nil
 }
 
-// probeAndRecord 对单个分组执行一次 ProbeForward 并写一行 group_health_probes。
-// ProbeForward 永远返回 (*result, nil) —— 失败信息在 result 字段里，不抛 error。
-func (p *Prober) probeAndRecord(ctx context.Context, g sdk.HostGroup) {
+// probeAndRecord 对单个分组执行一次 probe.forward 并写一行 group_health_probes。
+// probe.forward 永远返回 (*result, nil) —— 失败信息在 result 字段里，不抛 error。
+func (p *Prober) probeAndRecord(ctx context.Context, g hostGroup) {
 	target := fmt.Sprintf("group:%d", g.ID)
 	p.logger.Debug("health_probe_start",
 		"target", target,
@@ -213,7 +304,7 @@ func (p *Prober) probeAndRecord(ctx context.Context, g sdk.HostGroup) {
 		sdk.LogFieldPlatform, g.Platform,
 	)
 	start := time.Now()
-	res, err := p.host.ProbeForward(ctx, sdk.HostProbeForwardRequest{GroupID: g.ID})
+	res, err := p.probeForward(ctx, g.ID)
 	if err != nil {
 		// gRPC 级别错误（极少发生：broker 挂了、context 取消等），
 		// 作为一行 error_kind=rpc_error 写入，便于诊断
@@ -266,7 +357,7 @@ func (p *Prober) probeAndRecord(ctx context.Context, g sdk.HostGroup) {
 //   - 多副本部署也各自记自己的计数；这与 prober 本身没有 leader election 一致
 const probeUnhealthyThreshold = 3
 
-func (p *Prober) handleProbeOutcome(_ context.Context, g sdk.HostGroup, success bool) {
+func (p *Prober) handleProbeOutcome(_ context.Context, g hostGroup, success bool) {
 	target := fmt.Sprintf("group:%d", g.ID)
 	p.failureMu.Lock()
 	defer p.failureMu.Unlock()
@@ -299,7 +390,7 @@ func (p *Prober) handleProbeOutcome(_ context.Context, g sdk.HostGroup, success 
 
 // insertProbeRow 往 group_health_probes 写一行。
 // res 可以为 nil（RPC 错误时），此时 errKind/errMsg 由调用方提供。
-func (p *Prober) insertProbeRow(ctx context.Context, g sdk.HostGroup, res *sdk.HostProbeForwardResult, overrideKind, overrideMsg string) error {
+func (p *Prober) insertProbeRow(ctx context.Context, g hostGroup, res *hostProbeForwardResult, overrideKind, overrideMsg string) error {
 	var (
 		success    bool
 		latencyMs  int64
@@ -356,12 +447,12 @@ func (p *Prober) ProbeGroup(ctx context.Context, groupID int64) (GroupProbeResul
 		return GroupProbeResult{}, &HostNotReadyError{}
 	}
 
-	// 先确认这个 group 存在（通过 ListGroups 拿 platform，顺便校验）
-	groups, err := p.host.ListGroups(ctx)
+	// 先确认这个 group 存在（通过 groups.list 拿 platform，顺便校验）
+	groups, err := p.listGroups(ctx)
 	if err != nil {
 		return GroupProbeResult{}, err
 	}
-	var target *sdk.HostGroup
+	var target *hostGroup
 	for i := range groups {
 		if groups[i].ID == groupID {
 			target = &groups[i]
@@ -380,7 +471,7 @@ func (p *Prober) ProbeGroup(ctx context.Context, groupID int64) (GroupProbeResul
 		"manual", true,
 	)
 	start := time.Now()
-	res, err := p.host.ProbeForward(ctx, sdk.HostProbeForwardRequest{GroupID: groupID})
+	res, err := p.probeForward(ctx, groupID)
 	if err != nil {
 		p.logger.Warn("health_probe_failed",
 			"target", manualTarget,

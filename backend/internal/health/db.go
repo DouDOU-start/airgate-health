@@ -27,7 +27,7 @@ import (
 //     按 (probed_at) 做 retention 清理
 //
 // 注意：本插件不写 core 表，account 状态机仍由 core scheduler 自己根据真实流量维护；
-// 探测过程中通过 HostService.ProbeForward 间接让 scheduler 状态机受益。
+// 探测过程中通过 HostService 的 probe.forward 方法间接让 scheduler 状态机受益。
 const schemaSQL = `
 CREATE TABLE IF NOT EXISTS group_health_probes (
     id           BIGSERIAL PRIMARY KEY,
