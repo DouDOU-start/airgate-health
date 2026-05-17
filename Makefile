@@ -6,7 +6,7 @@
 #   make build            # 完整构建：web/dist → backend/webdist → bin/airgate-health
 #   make manifest         # 重新生成 plugin.yaml
 
-GO := GOTOOLCHAIN=local go
+GO := GOTOOLCHAIN=local GOPRIVATE=github.com/DouDOU-start/airgate-sdk GONOPROXY=github.com/DouDOU-start/airgate-sdk GONOSUMDB=github.com/DouDOU-start/airgate-sdk go
 
 WEBDIST := backend/internal/health/webdist
 
