@@ -6,7 +6,7 @@
 #   make build            # 完整构建：web/dist → backend/webdist → bin/airgate-health
 #   make manifest         # 重新生成 plugin.yaml
 
-GO := GOTOOLCHAIN=local GOPRIVATE=github.com/DouDOU-start/airgate-sdk GONOPROXY=github.com/DouDOU-start/airgate-sdk GONOSUMDB=github.com/DouDOU-start/airgate-sdk go
+GO := GOTOOLCHAIN=local GOPRIVATE=github.com/DouDOU-start/airgate-sdk GONOPROXY=github.com/DouDOU-start/airgate-sdk go
 
 WEBDIST := backend/internal/health/webdist
 
@@ -75,7 +75,7 @@ lint: ## 代码检查（需要安装 golangci-lint）
 		exit 1; \
 	fi
 	@cd backend && $(GO) mod download
-	@cd backend && GOPRIVATE=github.com/DouDOU-start/airgate-sdk GONOPROXY=github.com/DouDOU-start/airgate-sdk GONOSUMDB=github.com/DouDOU-start/airgate-sdk golangci-lint run ./...
+	@cd backend && GOPRIVATE=github.com/DouDOU-start/airgate-sdk GONOPROXY=github.com/DouDOU-start/airgate-sdk golangci-lint run ./...
 	@echo "代码检查通过"
 
 fmt: ## 格式化代码
