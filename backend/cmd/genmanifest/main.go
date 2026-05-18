@@ -59,7 +59,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "生成 manifest 失败: %v\n", err)
 		os.Exit(1)
 	}
-	target, err := manifestPath()
+	target, err := manifestFilePath()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "定位 plugin.yaml 失败: %v\n", err)
 		os.Exit(1)
@@ -97,7 +97,7 @@ func renderManifest() ([]byte, error) {
 	return append([]byte(generatedComment), body.Bytes()...), nil
 }
 
-func manifestPath() (string, error) {
+func manifestFilePath() (string, error) {
 	_, filename, _, ok := runtime.Caller(0)
 	if !ok {
 		return "", fmt.Errorf("无法定位源文件")

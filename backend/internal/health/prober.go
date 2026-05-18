@@ -63,14 +63,6 @@ type ProberOptions struct {
 	Jitter      time.Duration // 每次循环开头随机等待 [0, Jitter)；默认 5s
 }
 
-func defaultProberOptions() ProberOptions {
-	return ProberOptions{
-		Interval:    5 * time.Minute,
-		Concurrency: 4,
-		Jitter:      5 * time.Second,
-	}
-}
-
 type Prober struct {
 	logger *slog.Logger
 	db     *sql.DB

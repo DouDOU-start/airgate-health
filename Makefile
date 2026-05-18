@@ -10,7 +10,7 @@ GO := GOTOOLCHAIN=local GOPRIVATE=github.com/DouDOU-start/airgate-sdk GONOPROXY=
 
 WEBDIST := backend/internal/health/webdist
 
-.PHONY: help install build build-web build-backend release manifest dev ensure-webdist clean test vet ci type-check pre-commit setup-hooks
+.PHONY: help install build build-web build-backend release manifest dev ensure-webdist clean test vet lint fmt ci type-check pre-commit setup-hooks
 
 help: ## 显示帮助信息
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -65,9 +65,26 @@ manifest: ## 重新生成 plugin.yaml
 
 # ===================== 质量检查 =====================
 
-ci: ensure-webdist type-check vet test build-backend ## 本地运行与 CI 完全一致的检查
+ci: ensure-webdist lint type-check vet test build-backend ## 本地运行与 CI 完全一致的检查
 
-pre-commit: ensure-webdist type-check vet test ## pre-commit hook 调用（test 会跑 cmd/genmanifest 拦截 plugin.yaml 漂移）
+pre-commit: ensure-webdist lint type-check vet test ## pre-commit hook 调用（test 会跑 cmd/genmanifest 拦截 plugin.yaml 漂移）
+
+lint: ## 代码检查（需要安装 golangci-lint）
+	@if ! command -v golangci-lint > /dev/null 2>&1; then \
+		echo "错误: 未安装 golangci-lint，请执行: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"; \
+		exit 1; \
+	fi
+	@cd backend && golangci-lint run ./...
+	@echo "代码检查通过"
+
+fmt: ## 格式化代码
+	@cd backend && \
+	if command -v goimports > /dev/null 2>&1; then \
+		goimports -w -local github.com/DouDOU-start .; \
+	else \
+		$(GO) fmt ./...; \
+	fi
+	@echo "代码格式化完成"
 
 type-check: ## 前端 TypeScript 类型检查
 	cd web && pnpm type-check

@@ -199,7 +199,7 @@ func (a *Aggregator) PlatformHealthList(ctx context.Context, w Window, includeDa
 	if err != nil {
 		return nil, fmt.Errorf("聚合平台健康失败: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []PlatformHealth
 	for rows.Next() {
@@ -255,7 +255,7 @@ func (a *Aggregator) fillMissingPlatforms(ctx context.Context, out *[]PlatformHe
 	if err != nil {
 		return fmt.Errorf("查询 groups 失败: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	have := make(map[string]bool, len(*out))
 	for _, ph := range *out {
@@ -328,7 +328,7 @@ func (a *Aggregator) GroupHealthList(ctx context.Context, w Window, includeDaily
 	if err != nil {
 		return nil, fmt.Errorf("聚合 group 健康失败: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []GroupHealth
 	for rows.Next() {
@@ -433,7 +433,7 @@ func (a *Aggregator) hourlyBucketsByGroup(ctx context.Context, groupID int64, ho
 	if err != nil {
 		return nil, fmt.Errorf("hourly 桶查询失败: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []HourlyPoint
 	for rows.Next() {
 		var hp HourlyPoint
@@ -468,7 +468,7 @@ func (a *Aggregator) dailyBuckets(ctx context.Context, filterColumn string, filt
 	if err != nil {
 		return nil, fmt.Errorf("daily 桶查询失败: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []DailyPoint
 	for rows.Next() {
 		var dp DailyPoint
@@ -493,7 +493,7 @@ func (a *Aggregator) scanLatencies(ctx context.Context, sqlStr string, args ...i
 	if err != nil {
 		return nil, fmt.Errorf("查询 latency 失败: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make([]int, 0, 256)
 	for rows.Next() {
 		var v int
