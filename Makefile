@@ -74,7 +74,8 @@ lint: ## 代码检查（需要安装 golangci-lint）
 		echo "错误: 未安装 golangci-lint，请执行: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"; \
 		exit 1; \
 	fi
-	@cd backend && golangci-lint run ./...
+	@cd backend && $(GO) mod download
+	@cd backend && GOPRIVATE=github.com/DouDOU-start/airgate-sdk GONOPROXY=github.com/DouDOU-start/airgate-sdk GONOSUMDB=github.com/DouDOU-start/airgate-sdk golangci-lint run ./...
 	@echo "代码检查通过"
 
 fmt: ## 格式化代码
