@@ -10,7 +10,7 @@ GO := GOTOOLCHAIN=local GOPRIVATE=github.com/DouDOU-start/airgate-sdk GONOPROXY=
 
 WEBDIST := backend/internal/health/webdist
 
-.PHONY: help install build build-web build-backend release manifest dev ensure-webdist clean test vet ci type-check
+.PHONY: help install build build-web build-backend release manifest dev ensure-webdist clean test vet ci type-check pre-commit setup-hooks
 
 help: ## 显示帮助信息
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -67,6 +67,8 @@ manifest: ## 重新生成 plugin.yaml
 
 ci: ensure-webdist type-check vet test build-backend ## 本地运行与 CI 完全一致的检查
 
+pre-commit: ensure-webdist type-check vet test ## pre-commit hook 调用（test 会跑 cmd/genmanifest 拦截 plugin.yaml 漂移）
+
 type-check: ## 前端 TypeScript 类型检查
 	cd web && pnpm type-check
 
@@ -75,6 +77,14 @@ test: ensure-webdist ## 运行后端测试
 
 vet: ensure-webdist ## 静态分析
 	cd backend && $(GO) vet ./...
+
+# ===================== Git Hooks =====================
+
+setup-hooks: ## 安装 Git pre-commit hook
+	@echo '#!/bin/sh' > .git/hooks/pre-commit
+	@echo 'make pre-commit' >> .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
+	@echo "pre-commit hook 已安装"
 
 # ===================== 清理 =====================
 
