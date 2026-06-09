@@ -3,7 +3,7 @@
 > 叠加在 monorepo 根 `../CLAUDE.md` 之上。完整流程见共享 skill **`develop-plugin`**；接口契约见 `../airgate-sdk/CLAUDE.md`。
 
 - **插件身份**：id `airgate-health`，type `extension`，作用 = 提供商健康监控。
-- 实现 `sdk.ExtensionPlugin`：后台周期任务探测上游健康，结果经 `Host.Invoke` 回写/通知 core。
+- 实现 `sdk.ExtensionPlugin`：后台周期任务探测上游健康（`prober.go`），聚合结果（`aggregator.go`），经 `Host.Invoke` 回写 core。Core 的 `/status` 路由反代至本插件提供的公开状态页。
 
 ## 🚫 红线
 
