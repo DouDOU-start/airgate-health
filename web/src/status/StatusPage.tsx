@@ -373,13 +373,6 @@ const hourlyAxisStyle: React.CSSProperties = {
   fontVariantNumeric: 'tabular-nums',
 };
 
-const hourlyAxisDividerStyle: React.CSSProperties = {
-  flex: 1,
-  height: 1,
-  background: cssVar('glassBorder'),
-  margin: '0 12px',
-};
-
 const cardStyle: React.CSSProperties = {
   background: cssVar('bgSurface'),
   border: `1px solid ${cssVar('glassBorder')}`,
@@ -413,15 +406,6 @@ const cardMetaStyle: React.CSSProperties = {
   fontSize: 12,
   color: cssVar('textSecondary'),
   marginTop: 12,
-};
-
-const noteStyle: React.CSSProperties = {
-  marginTop: 6,
-  marginLeft: 22, // 与状态点对齐
-  fontSize: 12,
-  color: cssVar('textSecondary'),
-  whiteSpace: 'pre-wrap',
-  wordBreak: 'break-word',
 };
 
 const errStyle: React.CSSProperties = {

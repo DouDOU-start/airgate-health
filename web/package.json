@@ -7,7 +7,8 @@
   "scripts": {
     "build": "vite build && vite build --config vite.status.config.ts",
     "dev": "vite build --watch & vite build --config vite.status.config.ts --watch & wait",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "lint": "eslint src"
   },
   "dependencies": {
     "@doudou-start/airgate-theme": "https://github.com/DouDOU-start/airgate-sdk/releases/download/v0.2.0/airgate-theme-v0.2.0.tgz",
@@ -19,6 +20,9 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
     "typescript": "^5.7.0",
-    "vite": "^6.0.0"
+    "vite": "^6.0.0",
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.1.0",
+    "typescript-eslint": "^8.58.0"
   }
 }
