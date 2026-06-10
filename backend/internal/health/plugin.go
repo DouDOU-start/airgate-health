@@ -89,16 +89,16 @@ func (p *Plugin) Init(ctx sdk.PluginContext) error {
 		return nil
 	}
 	p.db = db
-	p.agg = NewAggregator(db)
 
 	// 通过 sdk.HostAware 拿到 core 反向调用客户端。
 	// 旧版本走 HTTP + admin_api_key；现在走 hashicorp/go-plugin GRPCBroker。
 	if hostAware, ok := ctx.(sdk.HostAware); ok {
 		p.host = hostAware.Host()
 	}
+	// aggregator 的分组元信息与可见性过滤依赖 Host（groups.list），不再直接查 core 表
+	p.agg = NewAggregator(db, p.host)
 	if p.host == nil {
-		p.logger.Warn("HostService 不可用（core 版本过旧或 host 未注入），探测循环不会启动；aggregator 仍可读历史数据")
-		// aggregator 仍然可用（读取已有数据），但 prober 不启动
+		p.logger.Warn("HostService 不可用（core 版本过旧或 host 未注入），探测循环与聚合查询均不可用")
 		p.publicEnabled.Store(cfg.GetBool("public_status_enabled"))
 		return nil
 	}
@@ -201,10 +201,9 @@ func (p *Plugin) BackgroundTasks() []sdk.BackgroundTask {
 }
 
 // Configured 报告插件是否已可服务请求（aggregator 已就绪）。
-// 注意：允许 host 为 nil 时 aggregator 仍可用，这样管理员即使在旧版 core 上
-// 也能看到历史数据。
+// aggregator 的分组元信息经 Host 获取，因此 host 也是就绪条件之一。
 func (p *Plugin) Configured() bool {
-	return p.db != nil && p.agg != nil
+	return p.db != nil && p.agg != nil && p.host != nil
 }
 
 // startPurgeLoop 启动后台清理协程，每 24 小时跑一次 purgeOldProbes。

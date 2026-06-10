@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	sdk "github.com/DouDOU-start/airgate-sdk/sdkgo"
 )
 
 // aggregator.go：聚合查询，把 group_health_probes 时序数据加工成可用率/延迟视图。
@@ -104,28 +106,40 @@ type GroupHealth struct {
 }
 
 // Aggregator 聚合查询的入口。
+//
+// db 只用于插件自有表 group_health_probes；分组元信息（name/platform/note）与
+// 可见性过滤一律经 Host.Invoke("groups.list") 从 core 获取，不直接查 core 表。
 type Aggregator struct {
-	db *sql.DB
+	db   *sql.DB
+	host sdk.Host
 }
 
-func NewAggregator(db *sql.DB) *Aggregator {
-	return &Aggregator{db: db}
+func NewAggregator(db *sql.DB, host sdk.Host) *Aggregator {
+	return &Aggregator{db: db, host: host}
 }
 
 // GroupHealthByID 单分组详情：基础信息 + 聚合 + 90 天日桶。
 func (a *Aggregator) GroupHealthByID(ctx context.Context, id int64, w Window) (*GroupHealth, error) {
-	// 1. 取 core groups 表的元信息（只读）
+	// 1. 经 core 取分组元信息
 	var gh GroupHealth
 	gh.GroupID = id
 	gh.Window = w.Name
 
-	row := a.db.QueryRowContext(ctx, `SELECT name, platform, COALESCE(note, '') FROM groups WHERE id = $1`, id)
-	if err := row.Scan(&gh.GroupName, &gh.Platform, &gh.Note); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("分组 %d 不存在", id)
-		}
+	groups, err := fetchGroups(ctx, a.host, false, 0)
+	if err != nil {
 		return nil, fmt.Errorf("查询分组失败: %w", err)
 	}
+	var meta *hostGroup
+	for i := range groups {
+		if groups[i].ID == id {
+			meta = &groups[i]
+			break
+		}
+	}
+	if meta == nil {
+		return nil, fmt.Errorf("分组 %d 不存在", id)
+	}
+	gh.GroupName, gh.Platform, gh.Note = meta.Name, meta.Platform, meta.Note
 
 	// 2. 拉窗口内 latency 样本（成功的）+ success/total 计数
 	since := time.Now().AddDate(0, 0, -w.Days)
@@ -238,116 +252,124 @@ func (a *Aggregator) PlatformHealthList(ctx context.Context, w Window, includeDa
 		}
 	}
 
-	// 也包含从未被 probe 过但存在的 platform（从 groups 表补齐）
-	if err := a.fillMissingPlatforms(ctx, &out, w.Name); err != nil {
-		return nil, err
+	// 也包含从未被 probe 过但存在的 platform（从 core 分组列表补齐）
+	groups, err := fetchGroups(ctx, a.host, false, 0)
+	if err != nil {
+		return nil, fmt.Errorf("查询分组失败: %w", err)
 	}
+	fillMissingPlatforms(&out, groups, w.Name)
 
 	return out, nil
 }
 
-// fillMissingPlatforms 把 groups 表里有但 group_health_probes 还没数据的 platform
-// 也加进结果列表，状态色标灰（uptime=-1 约定为 unknown）。
-func (a *Aggregator) fillMissingPlatforms(ctx context.Context, out *[]PlatformHealth, window string) error {
-	rows, err := a.db.QueryContext(ctx, `
-		SELECT platform, COUNT(*) FROM groups GROUP BY platform
-	`)
-	if err != nil {
-		return fmt.Errorf("查询 groups 失败: %w", err)
+// fillMissingPlatforms 把 core 分组列表里有但 group_health_probes 还没数据的
+// platform 也加进结果列表，状态色标灰（uptime=-1 约定为 unknown）。
+func fillMissingPlatforms(out *[]PlatformHealth, groups []hostGroup, window string) {
+	counts := make(map[string]int)
+	for _, g := range groups {
+		counts[g.Platform]++
 	}
-	defer func() { _ = rows.Close() }()
-
 	have := make(map[string]bool, len(*out))
 	for _, ph := range *out {
 		have[ph.Platform] = true
 	}
-	for rows.Next() {
-		var platform string
-		var cnt int
-		if err := rows.Scan(&platform, &cnt); err != nil {
-			return err
+	missing := make([]string, 0, len(counts))
+	for platform := range counts {
+		if !have[platform] {
+			missing = append(missing, platform)
 		}
-		if have[platform] {
-			continue
-		}
+	}
+	sort.Strings(missing)
+	for _, platform := range missing {
 		*out = append(*out, PlatformHealth{
 			Platform:    platform,
 			Window:      window,
-			GroupCount:  cnt,
+			GroupCount:  counts[platform],
 			UptimePct:   -1,
 			StatusColor: "gray",
 		})
 	}
-	return rows.Err()
 }
 
-// GroupHealthList 所有 group 的聚合（从 core groups 表出发，LEFT JOIN 探测数据）。
+// GroupHealthList 所有 group 的聚合（core 分组列表为基准，左联探测数据）。
 //
-// 用 LEFT JOIN 而不是只查 group_health_probes，是为了：
+// 以 core 返回的分组列表为基准、在 Go 侧补探测聚合，是为了：
 //   - 新加的分组即使还没被探测过，也要显示（状态灰）
-//   - 被删除的分组不会再出现（group_health_probes 里虽有历史数据但 JOIN 失败）
+//   - 被删除的分组不会再出现（group_health_probes 里虽有历史数据但不在分组列表中）
 //
 // hourlyHours > 0 时额外填充 GroupHealth.Hourly（按小时分桶，最近 N 小时）。
 // 公开状态页传 168（7 天 × 24 小时）；admin 视图传 0 跳过。
 //
-// 可见性过滤三档：
+// 可见性过滤三档（由 core 的 groups.list 完成，user_allowed_groups 判断不出 core）：
 //   - publicOnly=false：不过滤（admin 视图，看到全部分组）
-//   - publicOnly=true, userID=0：仅 g.status_visible = TRUE（匿名公开页）
-//   - publicOnly=true, userID>0：上一条 OR 用户在 user_allowed_groups 里有记录
+//   - publicOnly=true, userID=0：仅 status_visible=TRUE（匿名公开页）
+//   - publicOnly=true, userID>0：上一条 OR 用户被授权的专属分组
 //     （登录用户，看到公开分组 + 自己被授权的专属分组，哪怕该专属分组 status_visible=false）
 func (a *Aggregator) GroupHealthList(ctx context.Context, w Window, includeDaily bool, hourlyHours int, publicOnly bool, userID int) ([]GroupHealth, error) {
 	since := time.Now().AddDate(0, 0, -w.Days)
 
-	visibilityFilter := ""
-	args := []interface{}{since}
-	if publicOnly {
-		if userID > 0 {
-			// $2 是 userID；EXISTS 子查询命中 (user_id, group_id) 主键索引，成本 O(1)。
-			visibilityFilter = `WHERE g.status_visible = TRUE OR EXISTS (
-				SELECT 1 FROM user_allowed_groups uag
-				WHERE uag.user_id = $2 AND uag.group_id = g.id
-			)`
-			args = append(args, userID)
-		} else {
-			visibilityFilter = "WHERE g.status_visible = TRUE"
-		}
+	groups, err := fetchGroups(ctx, a.host, publicOnly, int64(userID))
+	if err != nil {
+		return nil, fmt.Errorf("查询分组失败: %w", err)
 	}
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].Platform != groups[j].Platform {
+			return groups[i].Platform < groups[j].Platform
+		}
+		return groups[i].Name < groups[j].Name
+	})
 
+	// 自有表一次聚合出每个 group 的 success/total/last_at，再与分组列表 join
+	type probeAgg struct {
+		success int
+		total   int
+		lastAt  sql.NullTime
+	}
+	aggByGroup := make(map[int64]probeAgg)
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT
-			g.id, g.name, g.platform, COALESCE(g.note, '') AS note,
-			COUNT(*) FILTER (WHERE p.success = TRUE) AS s,
-			COUNT(p.id) AS t,
-			MAX(p.probed_at) AS last_at
-		FROM groups g
-		LEFT JOIN group_health_probes p ON p.group_id = g.id AND p.probed_at >= $1
-		`+visibilityFilter+`
-		GROUP BY g.id, g.name, g.platform, g.note
-		ORDER BY g.platform, g.name
-	`, args...)
+			group_id,
+			COUNT(*) FILTER (WHERE success = TRUE) AS s,
+			COUNT(*) AS t,
+			MAX(probed_at) AS last_at
+		FROM group_health_probes
+		WHERE probed_at >= $1
+		GROUP BY group_id
+	`, since)
 	if err != nil {
 		return nil, fmt.Errorf("聚合 group 健康失败: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-
-	var out []GroupHealth
 	for rows.Next() {
-		var gh GroupHealth
-		gh.Window = w.Name
-		var lastAt sql.NullTime
-		if err := rows.Scan(&gh.GroupID, &gh.GroupName, &gh.Platform, &gh.Note,
-			&gh.SuccessCount, &gh.TotalProbes, &lastAt); err != nil {
+		var groupID int64
+		var pa probeAgg
+		if err := rows.Scan(&groupID, &pa.success, &pa.total, &pa.lastAt); err != nil {
 			return nil, err
 		}
-		gh.UptimePct = computeUptime(gh.SuccessCount, gh.TotalProbes)
-		if lastAt.Valid {
-			t := lastAt.Time
-			gh.LastProbedAt = &t
-		}
-		out = append(out, gh)
+		aggByGroup[groupID] = pa
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	var out []GroupHealth
+	for _, g := range groups {
+		gh := GroupHealth{
+			GroupID:   g.ID,
+			GroupName: g.Name,
+			Platform:  g.Platform,
+			Note:      g.Note,
+			Window:    w.Name,
+		}
+		if pa, ok := aggByGroup[g.ID]; ok {
+			gh.SuccessCount, gh.TotalProbes = pa.success, pa.total
+			if pa.lastAt.Valid {
+				t := pa.lastAt.Time
+				gh.LastProbedAt = &t
+			}
+		}
+		gh.UptimePct = computeUptime(gh.SuccessCount, gh.TotalProbes)
+		out = append(out, gh)
 	}
 
 	// 补 latency percentiles + 最近错误 + (可选) daily

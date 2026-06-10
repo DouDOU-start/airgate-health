@@ -50,12 +50,11 @@ DROP TABLE IF EXISTS health_probes;
 DROP TABLE IF EXISTS health_settings;
 `
 
-// openDB 打开 core 数据库连接，复用 lib/pq 驱动。
+// openDB 打开数据库连接，复用 lib/pq 驱动。
 //
 // 与 epay 共享一个模式：插件和 core 共用同一个 PostgreSQL 实例。
-// 这里的连接同时承担：
-//   - 写 group_health_probes（插件自有）
-//   - 读 groups（core 表，只读；用于列举探测目标 + groups.note 作为运维备注展示）
+// 此连接仅读写插件自有表 group_health_probes；分组元信息（含 note）与可见性
+// 过滤一律经 Host.Invoke("groups.list") 从 core 获取，不直接查 core 表。
 func openDB(dsn string) (*sql.DB, error) {
 	if dsn == "" {
 		return nil, errors.New("db_dsn 未配置")

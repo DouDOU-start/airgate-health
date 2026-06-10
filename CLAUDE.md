@@ -8,6 +8,7 @@
 ## 🚫 红线
 
 - 只依赖 `airgate-sdk`，禁止 import core 内部；用 core 能力经 `Host.Invoke`/`InvokeStream`。
+- `db_dsn` 连接仅读写插件自有表 `group_health_probes`；分组元信息与状态页可见性过滤一律经 `Host.Invoke("groups.list")`（支持 `{public_only, user_id}`），**禁止直接查 core 的 `groups`/`user_allowed_groups` 表**。
 - `plugin.yaml` 由 `make manifest` 生成，不可手改。
 - 前端单 `index.js` → `web/dist/index.js`，用 `@doudou-start/airgate-theme`。
 

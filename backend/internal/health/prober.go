@@ -45,6 +45,8 @@ type hostGroup struct {
 	Platform       string  `json:"platform"`
 	IsExclusive    bool    `json:"is_exclusive"`
 	RateMultiplier float64 `json:"rate_multiplier"`
+	Note           string  `json:"note"`
+	StatusVisible  bool    `json:"status_visible"`
 }
 
 type hostProbeForwardResult struct {
@@ -137,26 +139,7 @@ func (p *Prober) Stop() {
 }
 
 func (p *Prober) hostInvoke(ctx context.Context, method string, payload map[string]interface{}) (map[string]interface{}, error) {
-	if p.host == nil {
-		return nil, &HostNotReadyError{}
-	}
-	resp, err := p.host.Invoke(ctx, sdk.HostInvokeRequest{
-		Method:  method,
-		Payload: payload,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if resp == nil {
-		return map[string]interface{}{}, nil
-	}
-	if resp.Status == "error" {
-		if msg, _ := resp.Payload["message"].(string); msg != "" {
-			return nil, fmt.Errorf("%s", msg)
-		}
-		return nil, fmt.Errorf("core 方法 %s 返回错误", method)
-	}
-	return resp.Payload, nil
+	return invokeHost(ctx, p.host, method, payload)
 }
 
 func decodeHostValue[T any](payload map[string]interface{}, out *T, keys ...string) error {
@@ -178,15 +161,7 @@ func decodeHostValue[T any](payload map[string]interface{}, out *T, keys ...stri
 }
 
 func (p *Prober) listGroups(ctx context.Context) ([]hostGroup, error) {
-	payload, err := p.hostInvoke(ctx, hostMethodGroupsList, nil)
-	if err != nil {
-		return nil, err
-	}
-	var groups []hostGroup
-	if err := decodeHostValue(payload, &groups, "groups", "items", "data"); err != nil {
-		return nil, fmt.Errorf("解析 groups.list 响应失败: %w", err)
-	}
-	return groups, nil
+	return fetchGroups(ctx, p.host, false, 0)
 }
 
 func (p *Prober) probeForward(ctx context.Context, groupID int64) (*hostProbeForwardResult, error) {
