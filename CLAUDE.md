@@ -7,11 +7,10 @@
 
 ## 🚫 红线
 
-- 只依赖 `airgate-sdk`，禁止 import core 内部；用 core 能力经 `Host.Invoke`/`InvokeStream`。
+通用边界铁律（只依赖 `airgate-sdk`、经 `Host.Invoke`/`InvokeStream` 调 core、`plugin.yaml` 由 `make manifest` 生成不可手改、前端单 `index.js` bundle）见 skill **`develop-plugin`「🚫 边界铁律」**。本仓特有：
+
 - `db_dsn` 连接仅读写插件自有表 `group_health_probes`；分组元信息与状态页可见性过滤一律经 `Host.Invoke("groups.list")`（支持 `{public_only, user_id}`），**禁止直接查 core 的 `groups`/`user_allowed_groups` 表**。
-- `plugin.yaml` 由 `make manifest` 生成，不可手改。
-- 前端单 `index.js` → `web/dist/index.js`，用 `@doudou-start/airgate-theme`。
 
 ## 命令
 
-`make dev`（独立调试）· `make manifest` · `make build` · `make ci` · `make release`
+构建/发布命令见 skill **`develop-plugin`「构建 / 发布」**；本仓实际 make 目标以 `Makefile` 为准。
